@@ -168,6 +168,30 @@
     select{min-width:130px}input[type="number"]{width:148px}
     select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(22,163,74,.1)}
 
+    /* ── Info toggle inside hcard ─────────────────────────── */
+    .info-btn{
+      display:flex;align-items:center;justify-content:space-between;
+      width:100%;background:none;border:none;border-top:1px solid var(--brd);
+      margin-top:13px;padding:10px 0 0;cursor:pointer;
+      font-size:.76rem;font-weight:600;color:var(--muted);
+      font-family:inherit;text-align:left;transition:color var(--tr);
+    }
+    .info-btn:hover{color:var(--accent)}
+    .info-btn i.arr{transition:transform .22s ease;font-size:.7rem}
+    .info-btn.open i.arr{transform:rotate(180deg)}
+    .info-body{
+      overflow:hidden;max-height:0;
+      transition:max-height .3s ease, padding .3s ease;
+    }
+    .info-body.open{max-height:400px}
+    .info-inner{
+      border-top:1px dashed var(--brd);margin-top:10px;padding-top:12px;
+      font-size:.79rem;color:#4b5563;line-height:1.7;
+    }
+    .info-inner strong{color:var(--txt);font-weight:600}
+    .info-inner ul{margin:6px 0 0 14px}
+    .info-inner ul li{margin-bottom:3px}
+
     /* ── Buttons ──────────────────────────────────────────── */
     .btn{
       background:#111827;border:none;border-radius:var(--rs);color:#fff;
@@ -674,7 +698,45 @@ function buildSim(d){
     ? `Desde ${MONTHS_ES[d.start_month||1]} ${d.start_year}`
     : '';
 
-  const hcard=(cls,label,s,isC=false,winner=false)=>`<div class="hcard ${cls}">
+  // Explanations for each strategy
+  const INFO = {
+    a: `<strong>¿Cómo funciona?</strong><br>
+        Cada mes aportas dinero nuevo. Al cierre del año tu cartera se revalúa con la
+        rentabilidad completa del año.<br>
+        <ul>
+          <li>Las aportaciones <em>mensuales</em> de ese año obtienen ~la mitad de la rentabilidad
+              (se entiende que entras escalonadamente a lo largo del año).</li>
+          <li>La selección de fondos se basa en los 5 mejores del <em>año anterior</em>.</li>
+          <li>No hay venta ni rebalanceo hasta final de año.</li>
+        </ul>
+        <strong>Perfil:</strong> conservadora en costes de transacción, menor efecto compuesto.`,
+
+    b: `<strong>¿Cómo funciona?</strong><br>
+        Al inicio de cada año se vende <em>toda</em> la cartera y se reinvierte junto
+        con las aportaciones acumuladas del año.<br>
+        <ul>
+          <li>Todo el capital (anterior + nuevo) obtiene la rentabilidad completa del año.</li>
+          <li>Selección basada en los 5 mejores fondos del año anterior.</li>
+          <li>Mayor efecto compuesto que la estrategia A al reinvertir el 100% cada año.</li>
+        </ul>
+        <strong>Perfil:</strong> rebalanceo anual, buen equilibrio entre simplicidad y rentabilidad.`,
+
+    c: `<strong>¿Cómo funciona?</strong><br>
+        Cada mes se vende toda la cartera, se añade la aportación mensual y se reinvierte
+        en los <strong>5 fondos con mejor rentabilidad del mes anterior</strong>.<br>
+        <ul>
+          <li>Usa datos reales de NAV mensual de Morningstar (${470} fondos).</li>
+          <li>Máximo efecto compuesto: el capital total trabaja al 100% cada mes.</li>
+          <li>Mayor frecuencia de rotación que A y B → aprovecha el momentum mensual.</li>
+          <li>Los resultados dependen de la persistencia del momentum a corto plazo.</li>
+        </ul>
+        <strong>Perfil:</strong> la más precisa y la que mayor CAGR histórico muestra.`,
+  };
+
+  let _infoId = 0;
+  const hcard=(cls,label,s,isC=false,winner=false,infoKey='a')=>{
+    const id = `inf-${++_infoId}`;
+    return `<div class="hcard ${cls}">
     ${winner?'<div class="winner-tag">✅ MEJOR</div>':''}
     ${isC?`<div class="real-tag" style="top:${winner?36:12}px;right:13px">📊 NAV Real</div>`:''}
     <div class="hlbl">${label}</div>
@@ -686,7 +748,15 @@ function buildSim(d){
       <div><div class="hdlbl">CAGR</div><div class="hdval">${fe(s.cagr_pct,1)}</div></div>
     </div>
     ${periodStr?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--brd);font-size:.7rem;color:var(--muted)">${periodStr}</div>`:''}
+    <button class="info-btn" onclick="toggleInfo(this,'${id}')">
+      <span><i class="fa-solid fa-circle-info" style="margin-right:5px;color:var(--accent)"></i>+ Información</span>
+      <i class="fa-solid fa-chevron-down arr"></i>
+    </button>
+    <div class="info-body" id="${id}">
+      <div class="info-inner">${INFO[infoKey]||''}</div>
+    </div>
   </div>`;
+  };
 
   const kpis=`<div class="kpi-row">
     <div class="kpi"><div class="kpi-lbl">Período 🅲</div><div class="kpi-val" style="font-size:.88rem;color:var(--teal)">${C.date_range||'—'}</div><div class="kpi-sub">${C.n_months} meses</div></div>
@@ -722,9 +792,9 @@ function buildSim(d){
 
   return `
   <div class="hero3">
-    ${hcard('sa','🅰 Básica · Anual',A)}
-    ${hcard('sb','🅱 Compound · Anual',B,false,winB)}
-    ${hcard('sc','🅲 Compound · Mensual REAL',C,true,winC)}
+    ${hcard('sa','🅰 Básica · Anual',A,false,false,'a')}
+    ${hcard('sb','🅱 Compound · Anual',B,false,winB,'b')}
+    ${hcard('sc','🅲 Compound · Mensual REAL',C,true,winC,'c')}
   </div>
   ${kpis}
   <div class="box" style="margin-bottom:16px">
@@ -751,6 +821,11 @@ function buildSim(d){
       <tbody>${rows}</tbody>
     </table></div>
   </div>`;
+}
+
+function toggleInfo(btn, id){
+  btn.classList.toggle('open');
+  document.getElementById(id)?.classList.toggle('open');
 }
 
 function toggleDet(tr,id){
