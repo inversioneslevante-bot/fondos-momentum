@@ -1,22 +1,22 @@
 """
-Backtester: momentum annual strategy
-  - Each year: invest in the TOP 5 funds of the PREVIOUS year
-  - Rebalance at the start of each year
-  - Monthly contribution throughout the year (mid-year approximation)
+Unified momentum backtest — all 3 strategies in one optimized pass.
 
-NOTE: The CSV provides annual returns (2013-2025), so the simulation
-uses ANNUAL rebalancing — a faithful approximation of the monthly
-strategy the user described. The direction and magnitude of returns
-are real Morningstar data; only rebalancing frequency differs.
+  A  Annual basic:    contributions earn ~half the year's return.
+  B  Annual compound: sell all + contribution → invest total each year.
+  C  Monthly compound: same as B with real monthly Morningstar NAV data.
+
+Entry point: run_all(monthly_contribution) → {strategy_a, strategy_b, strategy_c, monthly}
 """
+import os, sqlite3
+from typing import Dict, List
 
-import sqlite3
-import os
-import math
-from typing import Dict, List, Optional
+DB_PATH = os.environ.get(
+    "FONDOS_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "data", "cache.db"),
+)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cache.db")
 
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _q(sql: str, params: tuple = ()) -> List[Dict]:
     con = sqlite3.connect(DB_PATH)
@@ -27,390 +27,247 @@ def _q(sql: str, params: tuple = ()) -> List[Dict]:
         con.close()
 
 
-def run_backtest(
-    monthly_contribution: float = 1_000.0,
-    start_year: int = 2016,
-    end_year:   int = 2025,
-) -> dict:
-    """
-    Simulate investing monthly_contribution every month in the top-5
-    funds ranked by previous year's annual return.
+def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False):
+    profit  = port - invested
+    n       = len(periods)
+    annexp  = 12 / n if (is_monthly and n) else (1 / n if n else 1)
+    cagr    = ((port / invested) ** annexp - 1) * 100 if invested and n else 0
+    pos     = sum(1 for p in periods if p.get("ret", 0) > 0)
+    best    = max(periods, key=lambda p: p.get("ret", -999), default=None)
+    worst   = min(periods, key=lambda p: p.get("ret",  999), default=None)
 
-    Capital model:
-      - Portfolio at start of year Y = portfolio × (1 + strategy_return_Y-1)
-                                       + (year_contribution × mid-year factor)
-    """
-
-    portfolio   = 0.0   # strategy portfolio (€)
-    bench_port  = 0.0   # equal-weight benchmark (all funds)
-    invested    = 0.0   # cumulative cash invested (€)
-    annual_c    = monthly_contribution * 12  # €/year
-    yearly      = []
-
-    for year in range(start_year, end_year + 1):
-        signal = year - 1
-
-        # ── 1. Pick top-5 from signal year ──────────────────────────────
-        top5_signal = _q("""
-            SELECT a.isin, a.return_pct AS sig_ret,
-                   f.name, f.category_mediolanum AS cat,
-                   f.manager
-            FROM annual_returns a
-            JOIN funds f ON f.isin = a.isin
-            WHERE a.year = ? AND a.return_pct IS NOT NULL
-            ORDER BY a.return_pct DESC
-            LIMIT 5
-        """, (signal,))
-
-        if not top5_signal:
-            continue  # no data for signal year
-
-        # ── 2. Get their ACTUAL return in 'year' ────────────────────────
-        actual = []
-        funds_detail = []
-        for f in top5_signal:
-            row = _q("SELECT return_pct FROM annual_returns WHERE isin=? AND year=?",
-                     (f["isin"], year))
-            ret = row[0]["return_pct"] if row else None
-            funds_detail.append({
-                "isin":          f["isin"],
-                "name":          f["name"],
-                "category":      f["cat"],
-                "manager":       f["manager"],
-                "signal_return": round(f["sig_ret"], 2),
-                "actual_return": round(ret, 2) if ret is not None else None,
-            })
-            if ret is not None:
-                actual.append(ret)
-
-        if not actual:
-            continue
-
-        strat_ret = sum(actual) / len(actual)   # avg return of the 5 funds
-
-        # ── 3. Benchmark: equal-weight ALL funds ────────────────────────
-        bench_row = _q("""
-            SELECT AVG(return_pct) AS avg_r
-            FROM annual_returns
-            WHERE year = ? AND return_pct IS NOT NULL
-        """, (year,))
-        bench_ret = bench_row[0]["avg_r"] or 0.0
-
-        # ── 4. Update portfolios ─────────────────────────────────────────
-        # Existing capital grows by annual return
-        port_grown  = portfolio  * (1 + strat_ret  / 100)
-        bench_grown = bench_port * (1 + bench_ret / 100)
-
-        # New contributions: assume invested evenly through year
-        # ⇒ average exposure = 6 months → half-year return factor
-        contrib_factor_s = 1 + (strat_ret  / 100) * 0.5
-        contrib_factor_b = 1 + (bench_ret / 100) * 0.5
-
-        portfolio  = port_grown  + annual_c * contrib_factor_s
-        bench_port = bench_grown + annual_c * contrib_factor_b
-        invested  += annual_c
-
-        yearly.append({
-            "year":             year,
-            "strategy_return":  round(strat_ret,  2),
-            "benchmark_return": round(bench_ret,  2),
-            "portfolio_value":  round(portfolio,  2),
-            "bench_value":      round(bench_port, 2),
-            "total_invested":   round(invested,   2),
-            "profit_vs_cost":   round(portfolio - invested, 2),
-            "n_funds":          len(actual),
-            "funds_selected":   funds_detail,
-        })
-
-    # ── 5. Apply current partial period (2026) ───────────────────────────
-    # Signal = 2025 top-5; apply their 1m return (March 2026)
-    top5_2025 = _q("""
-        SELECT a.isin, a.return_pct AS sig_ret,
-               f.name, f.category_mediolanum AS cat, f.manager,
-               p.return_1m
-        FROM annual_returns a
-        JOIN funds f ON f.isin = a.isin
-        LEFT JOIN period_returns p ON p.isin = a.isin
-        WHERE a.year = 2025 AND a.return_pct IS NOT NULL
-        ORDER BY a.return_pct DESC
-        LIMIT 5
-    """)
-
-    current_1m = [r["return_1m"] for r in top5_2025 if r["return_1m"] is not None]
-    current_ret = sum(current_1m) / len(current_1m) if current_1m else 0.0
-
-    # Benchmark 1m (all funds average)
-    bench_1m_row = _q("SELECT AVG(return_1m) AS avg FROM period_returns WHERE return_1m IS NOT NULL")
-    bench_1m = bench_1m_row[0]["avg"] or 0.0
-
-    # No new contribution for partial month (March only)
-    portfolio  *= (1 + current_ret / 100)
-    bench_port *= (1 + bench_1m   / 100)
-
-    current_period = {
-        "year":             "2026 (Mar)",
-        "strategy_return":  round(current_ret, 2),
-        "benchmark_return": round(bench_1m,    2),
-        "portfolio_value":  round(portfolio,   2),
-        "bench_value":      round(bench_port,  2),
-        "total_invested":   round(invested,    2),
-        "profit_vs_cost":   round(portfolio - invested, 2),
-        "n_funds":          len(current_1m),
-        "funds_selected": [{
-            "isin":          r["isin"],
-            "name":          r["name"],
-            "category":      r["cat"],
-            "manager":       r["manager"],
-            "signal_return": round(r["sig_ret"], 2),
-            "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
-        } for r in top5_2025],
-    }
-    yearly.append(current_period)
-
-    # ── 6. Summary ────────────────────────────────────────────────────────
-    profit = portfolio - invested
-    total_return_pct = profit / invested * 100 if invested > 0 else 0
-    n_full_years = len(yearly) - 1  # exclude partial 2026
-    cagr = ((portfolio / invested) ** (1 / max(n_full_years, 1)) - 1) * 100 if invested > 0 else 0
-
-    full_years = [y for y in yearly if isinstance(y["year"], int)]
-    pos_years = sum(1 for y in full_years if y["strategy_return"] > 0)
-    neg_years = len(full_years) - pos_years
-    best  = max(full_years, key=lambda y: y["strategy_return"], default=None)
-    worst = min(full_years, key=lambda y: y["strategy_return"], default=None)
-
-    # Drawdown: max peak-to-trough in portfolio values
-    peak = 0.0
-    max_dd = 0.0
-    for y in full_years:
-        v = y["portfolio_value"]
-        if v > peak:
-            peak = v
-        dd = (peak - v) / peak * 100 if peak > 0 else 0
+    cum = peak = 1.0; max_dd = 0.0
+    for p in periods:
+        cum *= 1 + p.get("ret", 0) / 100
+        if cum > peak:
+            peak = cum
+        dd = (peak - cum) / peak * 100 if peak else 0
         if dd > max_dd:
             max_dd = dd
 
-    return {
-        "summary": {
-            "monthly_contribution":  monthly_contribution,
-            "total_invested":        round(invested, 2),
-            "final_value":           round(portfolio, 2),
-            "profit":                round(profit, 2),
-            "total_return_pct":      round(total_return_pct, 2),
-            "cagr_pct":              round(cagr, 2),
-            "bench_final":           round(bench_port, 2),
-            "bench_profit":          round(bench_port - invested, 2),
-            "bench_return_pct":      round((bench_port - invested) / invested * 100, 2) if invested else 0,
-            "n_years":               n_full_years,
-            "positive_years":        pos_years,
-            "negative_years":        neg_years,
-            "max_drawdown_pct":      round(max_dd, 2),
-            "strategy_beats_bench":  portfolio > bench_port,
-        },
-        "best_year":  {"year": best["year"],  "return": best["strategy_return"]}  if best  else None,
-        "worst_year": {"year": worst["year"], "return": worst["strategy_return"]} if worst else None,
-        "yearly": yearly,
+    d = {
+        "monthly_contribution": monthly_c,
+        "total_invested":        round(invested, 2),
+        "final_value":           round(port,     2),
+        "profit":                round(profit,   2),
+        "total_return_pct":      round(profit / invested * 100, 2) if invested else 0,
+        "cagr_pct":              round(cagr,     2),
+        "bench_final":           round(bench,    2),
+        "bench_profit":          round(bench - invested, 2),
+        "bench_return_pct":      round((bench - invested) / invested * 100, 2) if invested else 0,
+        "max_drawdown_pct":      round(max_dd, 2),
+        "strategy_beats_bench":  port > bench,
+        "best_period":  {"period": best["period"],  "return": best["ret"]}  if best  else None,
+        "worst_period": {"period": worst["period"], "return": worst["ret"]} if worst else None,
     }
+    if is_monthly:
+        d.update({
+            "n_months":        n,
+            "positive_months": pos,
+            "negative_months": n - pos,
+        })
+    else:
+        d.update({
+            "n_years":        n,
+            "positive_years": pos,
+            "negative_years": n - pos,
+        })
+    return d
 
 
-def run_backtest_compound(
-    monthly_contribution: float = 1_000.0,
-    start_year: int = 2016,
-    end_year:   int = 2025,
-) -> dict:
-    """
-    ESTRATEGIA FULL COMPOUND:
-    Al inicio de cada año, vendes TODO lo que tienes, añades la aportación
-    anual (12 × mensual) y lo reinviertes entero en los 5 mejores fondos
-    del año anterior. Todo el capital compone junto en cada período.
+# ── strategies A + B  (annual data) ──────────────────────────────────────────
 
-    Fórmula: portfolio = (portfolio + aportación_anual) × (1 + retorno/100)
+def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = 2025):
+    annual_c = monthly_c * 12
 
-    Diferencia clave vs run_backtest():
-    - Toda la cartera (acumulada + nueva aportación) gana/pierde el retorno
-      completo del año → mayor efecto compound en años buenos, mayor caída
-      en años malos.
-    """
+    # One bulk query — all years including signal year (start_year-1)
+    rows = _q("""
+        SELECT a.year, a.isin, a.return_pct,
+               f.name, f.category_mediolanum AS cat, f.manager
+        FROM annual_returns a JOIN funds f USING (isin)
+        WHERE a.year BETWEEN ? AND ? AND a.return_pct IS NOT NULL
+        ORDER BY a.year, a.return_pct DESC
+    """, (start_year - 1, end_year))
 
-    portfolio   = 0.0
-    bench_port  = 0.0
-    invested    = 0.0
-    annual_c    = monthly_contribution * 12
-    yearly      = []
+    by_year: Dict[int, List[Dict]] = {}
+    for r in rows:
+        by_year.setdefault(r["year"], []).append(r)
 
-    for year in range(start_year, end_year + 1):
-        signal = year - 1
+    portA = portB = benchA = benchB = invested = 0.0
+    periA: List[Dict] = []
+    periB: List[Dict] = []
 
-        top5_signal = _q("""
-            SELECT a.isin, a.return_pct AS sig_ret,
-                   f.name, f.category_mediolanum AS cat, f.manager
-            FROM annual_returns a
-            JOIN funds f ON f.isin = a.isin
-            WHERE a.year = ? AND a.return_pct IS NOT NULL
-            ORDER BY a.return_pct DESC
-            LIMIT 5
-        """, (signal,))
-
-        if not top5_signal:
+    for yr in range(start_year, end_year + 1):
+        if yr - 1 not in by_year or yr not in by_year:
             continue
 
-        actual = []
-        funds_detail = []
-        for f in top5_signal:
-            row = _q("SELECT return_pct FROM annual_returns WHERE isin=? AND year=?",
-                     (f["isin"], year))
-            ret = row[0]["return_pct"] if row else None
-            funds_detail.append({
-                "isin":          f["isin"],
-                "name":          f["name"],
-                "category":      f["cat"],
-                "manager":       f["manager"],
-                "signal_return": round(f["sig_ret"], 2),
-                "actual_return": round(ret, 2) if ret is not None else None,
-            })
-            if ret is not None:
-                actual.append(ret)
-
+        top5     = by_year[yr - 1][:5]
+        curr_lut = {r["isin"]: r["return_pct"] for r in by_year[yr]}
+        actual   = [curr_lut[f["isin"]] for f in top5 if f["isin"] in curr_lut]
         if not actual:
             continue
 
-        strat_ret = sum(actual) / len(actual)
+        sr = sum(actual) / len(actual)
+        br = sum(r["return_pct"] for r in by_year[yr]) / len(by_year[yr])
 
-        bench_row = _q("""
-            SELECT AVG(return_pct) AS avg_r
-            FROM annual_returns
-            WHERE year = ? AND return_pct IS NOT NULL
-        """, (year,))
-        bench_ret = bench_row[0]["avg_r"] or 0.0
+        # A: existing capital earns full return; new contributions earn ~half
+        portA  = portA  * (1 + sr / 100) + annual_c * (1 + sr / 200)
+        benchA = benchA * (1 + br / 100) + annual_c * (1 + br / 200)
+        # B: sell everything + contribution → invest all at full return
+        portB  = (portB  + annual_c) * (1 + sr / 100)
+        benchB = (benchB + annual_c) * (1 + br / 100)
 
-        # ── FULL COMPOUND ────────────────────────────────────────────────
-        # Sell everything + add annual contribution → invest total → apply return
-        portfolio  = (portfolio  + annual_c) * (1 + strat_ret / 100)
-        bench_port = (bench_port + annual_c) * (1 + bench_ret / 100)
-        invested  += annual_c
+        invested += annual_c
+        funds_det = [{
+            "isin": f["isin"], "name": f["name"], "category": f["cat"],
+            "signal_return": round(f["return_pct"], 2),
+            "actual_return": round(curr_lut[f["isin"]], 2) if f["isin"] in curr_lut else None,
+        } for f in top5]
 
-        yearly.append({
-            "year":             year,
-            "strategy_return":  round(strat_ret, 2),
-            "benchmark_return": round(bench_ret, 2),
-            "portfolio_value":  round(portfolio, 2),
-            "bench_value":      round(bench_port, 2),
+        base = {
+            "year": yr, "period": str(yr), "ret": sr,
+            "strategy_return":  round(sr, 2),
+            "benchmark_return": round(br, 2),
             "total_invested":   round(invested, 2),
-            "profit_vs_cost":   round(portfolio - invested, 2),
             "n_funds":          len(actual),
-            "funds_selected":   funds_detail,
-        })
+            "funds_selected":   funds_det,
+        }
+        periA.append({**base, "portfolio_value": round(portA, 2),
+                      "bench_value": round(benchA, 2),
+                      "profit_vs_cost": round(portA - invested, 2)})
+        periB.append({**base, "portfolio_value": round(portB, 2),
+                      "bench_value": round(benchB, 2),
+                      "profit_vs_cost": round(portB - invested, 2)})
 
-    # ── Partial 2026 (March) — same top-5 signal from 2025 ──────────────
-    top5_2025 = _q("""
+    # Partial 2026 (March 1m return) — signal = 2025 top-5
+    top5_25 = _q("""
         SELECT a.isin, a.return_pct AS sig_ret,
-               f.name, f.category_mediolanum AS cat, f.manager,
-               p.return_1m
-        FROM annual_returns a
-        JOIN funds f ON f.isin = a.isin
-        LEFT JOIN period_returns p ON p.isin = a.isin
+               f.name, f.category_mediolanum AS cat, p.return_1m
+        FROM annual_returns a JOIN funds f USING (isin)
+        LEFT JOIN period_returns p USING (isin)
         WHERE a.year = 2025 AND a.return_pct IS NOT NULL
-        ORDER BY a.return_pct DESC
-        LIMIT 5
+        ORDER BY a.return_pct DESC LIMIT 5
     """)
-    current_1m  = [r["return_1m"] for r in top5_2025 if r["return_1m"] is not None]
-    current_ret = sum(current_1m) / len(current_1m) if current_1m else 0.0
+    cur_1m = [r["return_1m"] for r in top5_25 if r["return_1m"] is not None]
+    b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
+    b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
 
-    bench_1m_row = _q("SELECT AVG(return_1m) AS avg FROM period_returns WHERE return_1m IS NOT NULL")
-    bench_1m = bench_1m_row[0]["avg"] or 0.0
+    if cur_1m:
+        r1m = sum(cur_1m) / len(cur_1m)
+        portA  *= (1 + r1m / 100);  benchA  *= (1 + b1m / 100)
+        portB   = (portB  + monthly_c) * (1 + r1m / 100)
+        benchB  = (benchB + monthly_c) * (1 + b1m / 100)
+        invested += monthly_c
 
-    # March 2026: add 1 month contribution, apply 1m return to everything
-    portfolio  = (portfolio  + monthly_contribution) * (1 + current_ret / 100)
-    bench_port = (bench_port + monthly_contribution) * (1 + bench_1m   / 100)
-    invested  += monthly_contribution  # 1 extra month
-
-    current_period = {
-        "year":             "2026 (Mar)",
-        "strategy_return":  round(current_ret, 2),
-        "benchmark_return": round(bench_1m, 2),
-        "portfolio_value":  round(portfolio, 2),
-        "bench_value":      round(bench_port, 2),
-        "total_invested":   round(invested, 2),
-        "profit_vs_cost":   round(portfolio - invested, 2),
-        "n_funds":          len(current_1m),
-        "funds_selected": [{
-            "isin":          r["isin"],
-            "name":          r["name"],
-            "category":      r["cat"],
-            "manager":       r["manager"],
+        partial_funds = [{
+            "isin": r["isin"], "name": r["name"], "category": r["cat"],
             "signal_return": round(r["sig_ret"], 2),
             "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
-        } for r in top5_2025],
-    }
-    yearly.append(current_period)
+        } for r in top5_25]
 
-    # ── Summary ──────────────────────────────────────────────────────────
-    profit           = portfolio - invested
-    total_return_pct = profit / invested * 100 if invested > 0 else 0
-    full_years       = [y for y in yearly if isinstance(y["year"], int)]
-    n_full_years     = len(full_years)
-    cagr             = ((portfolio / invested) ** (1 / max(n_full_years, 1)) - 1) * 100 if invested > 0 else 0
-    pos_years        = sum(1 for y in full_years if y["strategy_return"] > 0)
-    neg_years        = len(full_years) - pos_years
-    best  = max(full_years, key=lambda y: y["strategy_return"], default=None)
-    worst = min(full_years, key=lambda y: y["strategy_return"], default=None)
-
-    # Drawdown on PORTFOLIO VALUE (not just return %) — meaningful here
-    # because all capital is at risk each year
-    peak = 0.0
-    max_dd = 0.0
-    for y in full_years:
-        v = y["portfolio_value"]
-        if v > peak:
-            peak = v
-        dd = (peak - v) / peak * 100 if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
+        pbase = {
+            "year": "2026 (Mar)", "period": "2026 (Mar)", "ret": r1m,
+            "strategy_return": round(r1m, 2), "benchmark_return": round(b1m, 2),
+            "total_invested": round(invested, 2), "n_funds": len(cur_1m),
+            "funds_selected": partial_funds,
+        }
+        periA.append({**pbase, "portfolio_value": round(portA, 2),
+                      "bench_value": round(benchA, 2),
+                      "profit_vs_cost": round(portA - invested, 2)})
+        periB.append({**pbase, "portfolio_value": round(portB, 2),
+                      "bench_value": round(benchB, 2),
+                      "profit_vs_cost": round(portB - invested, 2)})
 
     return {
-        "strategy": "compound",
-        "summary": {
-            "monthly_contribution":  monthly_contribution,
-            "total_invested":        round(invested, 2),
-            "final_value":           round(portfolio, 2),
-            "profit":                round(profit, 2),
-            "total_return_pct":      round(total_return_pct, 2),
-            "cagr_pct":              round(cagr, 2),
-            "bench_final":           round(bench_port, 2),
-            "bench_profit":          round(bench_port - invested, 2),
-            "bench_return_pct":      round((bench_port - invested) / invested * 100, 2) if invested else 0,
-            "n_years":               n_full_years,
-            "positive_years":        pos_years,
-            "negative_years":        neg_years,
-            "max_drawdown_pct":      round(max_dd, 2),
-            "strategy_beats_bench":  portfolio > bench_port,
-        },
-        "best_year":  {"year": best["year"],  "return": best["strategy_return"]}  if best  else None,
-        "worst_year": {"year": worst["year"], "return": worst["strategy_return"]} if worst else None,
-        "yearly": yearly,
+        "strategy_a": {"summary": _summarise(portA, benchA, invested, periA, monthly_c), "yearly": periA},
+        "strategy_b": {"summary": _summarise(portB, benchB, invested, periB, monthly_c), "yearly": periB},
+    }
+
+
+# ── strategy C  (real monthly NAV data) ──────────────────────────────────────
+
+def _monthly_compound(monthly_c: float):
+    # ONE bulk query instead of ~860 individual queries
+    rows = _q("""
+        SELECT m.isin, m.year_month, m.return_pct,
+               f.name, f.category_mediolanum AS cat
+        FROM monthly_nav m JOIN funds f USING (isin)
+        WHERE m.return_pct IS NOT NULL
+        ORDER BY m.year_month, m.return_pct DESC
+    """)
+
+    if not rows:
+        return {"error": "Sin datos mensuales."}
+
+    by_month: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_month.setdefault(r["year_month"], []).append(r)
+
+    months = sorted(by_month)
+    if len(months) < 3:
+        return {"error": "Datos insuficientes"}
+
+    port = bench = invested = 0.0
+    periods: List[Dict] = []
+
+    for i in range(1, len(months)):
+        sig = months[i - 1]
+        cur = months[i]
+
+        top5      = by_month[sig][:5]
+        curr_lut  = {r["isin"]: r["return_pct"] for r in by_month[cur]}
+        bench_all = [r["return_pct"] for r in by_month[cur]]
+        actual    = [curr_lut[f["isin"]] for f in top5 if f["isin"] in curr_lut]
+
+        if not actual:
+            continue
+
+        sr = sum(actual)     / len(actual)
+        br = sum(bench_all)  / len(bench_all)
+
+        port  = (port  + monthly_c) * (1 + sr / 100)
+        bench = (bench + monthly_c) * (1 + br / 100)
+        invested += monthly_c
+
+        periods.append({
+            "month": cur, "signal_month": sig, "period": cur, "ret": sr,
+            "strategy_return":  round(sr, 3),
+            "benchmark_return": round(br, 3),
+            "portfolio_value":  round(port,      2),
+            "bench_value":      round(bench,     2),
+            "total_invested":   round(invested,  2),
+            "profit":           round(port - invested, 2),
+            "n_funds":          len(actual),
+            "top5": [{
+                "isin": f["isin"], "name": f["name"], "category": f["cat"],
+                "signal_return": round(f["return_pct"], 2),
+                "actual_return": round(curr_lut[f["isin"]], 2) if f["isin"] in curr_lut else None,
+            } for f in top5],
+        })
+
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True)
+    s["date_range"] = f"{periods[0]['month']} → {periods[-1]['month']}" if periods else ""
+    return {"summary": s, "monthly": periods}
+
+
+# ── public entry ──────────────────────────────────────────────────────────────
+
+def run_all(monthly_contribution: float = 1_000.0) -> dict:
+    ab = _annual_both(monthly_contribution)
+    c  = _monthly_compound(monthly_contribution)
+    return {
+        "strategy_a": ab["strategy_a"],
+        "strategy_b": ab["strategy_b"],
+        "strategy_c": c,
+        "monthly":    monthly_contribution,
     }
 
 
 if __name__ == "__main__":
-    result = run_backtest(monthly_contribution=1_000)
-    s = result["summary"]
-    print(f"\n{'='*60}")
-    print(f"  SIMULACIÓN MOMENTUM TOP-5 (aportación €1.000/mes)")
-    print(f"{'='*60}")
-    print(f"  Capital invertido total : €{s['total_invested']:>12,.0f}")
-    print(f"  Valor cartera a hoy     : €{s['final_value']:>12,.0f}")
-    print(f"  Ganancia / Pérdida      : €{s['profit']:>+12,.0f}")
-    print(f"  Rentabilidad total      : {s['total_return_pct']:>+.1f}%")
-    print(f"  CAGR anualizado         : {s['cagr_pct']:>+.1f}%")
-    print(f"  Años positivos / negativos: {s['positive_years']} / {s['negative_years']}")
-    print(f"  Max. drawdown           : -{s['max_drawdown_pct']:.1f}%")
-    print(f"  Benchmark (todos fondos): €{s['bench_final']:>12,.0f} ({s['bench_return_pct']:+.1f}%)")
-    print(f"\n  {'Año':<10} {'Retorno strat':>14} {'Bench':>8} {'Cartera':>14} {'Invertido':>12}")
-    print(f"  {'-'*62}")
-    for y in result["yearly"]:
-        print(f"  {str(y['year']):<10} {y['strategy_return']:>+13.1f}% {y['benchmark_return']:>+7.1f}%  €{y['portfolio_value']:>12,.0f}  €{y['total_invested']:>10,.0f}")
-    if result["best_year"]:
-        print(f"\n  Mejor año : {result['best_year']['year']} ({result['best_year']['return']:+.1f}%)")
-    if result["worst_year"]:
-        print(f"  Peor año  : {result['worst_year']['year']} ({result['worst_year']['return']:+.1f}%)")
-    print()
+    r = run_all(1_000)
+    for k in ("strategy_a", "strategy_b", "strategy_c"):
+        s = r[k].get("summary", r[k])
+        val = s.get("final_value", 0)
+        ret = s.get("total_return_pct", 0)
+        cag = s.get("cagr_pct", 0)
+        print(f"  {k}: €{val:>10,.0f}  {ret:>+.1f}%  CAGR {cag:>+.1f}%")

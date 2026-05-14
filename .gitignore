@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+
+# Environment
+.env
+.env.local
+
+# Database (runtime data — rebuild with import_csv.py)
+data/cache.db
+
+# Cloudflare binary (downloaded automatically by start_demo.sh)
+.cloudflared
+
+# Logs
+*.log
+/tmp/fondos_app.log
