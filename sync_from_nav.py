@@ -13,7 +13,6 @@ import logging
 import os
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +20,24 @@ DB_PATH = os.environ.get(
     "FONDOS_DB_PATH",
     os.path.join(os.path.dirname(__file__), "data", "cache.db"),
 )
+
+
+def _get_complete_month(con) -> str:
+    """
+    Return the last year_month with near-complete fund coverage (≥95% of
+    the previous month). This avoids using partial current-month data.
+    """
+    rows = con.execute(
+        "SELECT year_month, COUNT(*) as n FROM monthly_nav "
+        "WHERE return_pct IS NOT NULL GROUP BY year_month "
+        "ORDER BY year_month DESC LIMIT 3"
+    ).fetchall()
+    if not rows:
+        return None
+    latest_n = rows[0][1]
+    if len(rows) >= 2 and rows[1][1] > 0 and latest_n < rows[1][1] * 0.95:
+        return rows[1][0]  # latest is partial, use previous
+    return rows[0][0]
 
 
 def run_sync() -> dict:
@@ -40,7 +57,10 @@ def run_sync() -> dict:
     for r in rows:
         fund_months[r["isin"]].append((r["year_month"], r["return_pct"]))
 
-    latest_ym = max(r["year_month"] for r in rows)
+    # Use last COMPLETE month (not partial current month)
+    latest_ym = _get_complete_month(con)
+    if not latest_ym:
+        latest_ym = max(r["year_month"] for r in rows)
     current_year = latest_ym[:4]
 
     def _compound(months_list, n):
@@ -52,12 +72,24 @@ def run_sync() -> dict:
 
     updated = 0
     for isin, months in fund_months.items():
-        r1m = months[-1][1]
-        r3m  = _compound(months, 3)  if len(months) >= 3  else None
-        r6m  = _compound(months, 6)  if len(months) >= 6  else None
-        r1a  = _compound(months, 12) if len(months) >= 12 else None
+        # Build a dict for fast lookup by year_month
+        month_dict = {m: r for m, r in months}
 
-        ytd = [(m, r) for m, r in months if m.startswith(current_year)]
+        # r1m = return for the last COMPLETE month specifically
+        r1m = month_dict.get(latest_ym)
+        if r1m is None:
+            continue  # fund has no data for the complete reference month
+
+        # For compound periods, use only months up to and including latest_ym
+        months_upto = [(m, r) for m, r in months if m <= latest_ym]
+        if not months_upto:
+            continue
+
+        r3m  = _compound(months_upto, 3)  if len(months_upto) >= 3  else None
+        r6m  = _compound(months_upto, 6)  if len(months_upto) >= 6  else None
+        r1a  = _compound(months_upto, 12) if len(months_upto) >= 12 else None
+
+        ytd = [(m, r) for m, r in months_upto if m.startswith(current_year)]
         r_ytd = _compound(ytd, len(ytd)) if ytd else None
 
         con.execute(

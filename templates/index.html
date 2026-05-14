@@ -685,16 +685,28 @@ function buildPanel(d, mode){
   const avg = d.top5.reduce((s,f)=>s+f.return_pct,0)/d.top5.length;
   const tot = top?.total_funds_analyzed??'—';
   const pill = d.is_current
-    ? `<span class="pill pill-live"><i class="fa-solid fa-circle-dot"></i> En vivo</span>`
+    ? `<span class="pill pill-live"><i class="fa-solid fa-circle-dot"></i> Mes completo</span>`
     : `<span class="pill pill-hist"><i class="fa-solid fa-clock-rotate-left"></i> Histórico</span>`;
 
-  return `
+  // Note about how to compare with Morningstar
+  const msNote = d.morningstar_note ? `
+    <div style="background:#f0fdf4;border:1px solid rgba(22,163,74,.2);border-radius:var(--rs);
+                padding:11px 15px;margin-bottom:16px;font-size:.78rem;color:#166534;line-height:1.6">
+      <i class="fa-solid fa-circle-info" style="margin-right:6px"></i>
+      <strong>¿Cómo comparar en Morningstar?</strong> Estos porcentajes son
+      <strong>rentabilidades de mes completo</strong> (${d.date_range||'del 1 al último día del mes'}).
+      Para comparar, busca el <strong>historial de rentabilidades mensuales</strong> del fondo
+      en Morningstar — <em>no</em> uses la rentabilidad "1 mes" o "3 meses" de la ficha,
+      que son valores <em>rolling</em> desde hoy y muestran un período distinto.
+    </div>` : '';
+
+  return `${msNote}
   <div class="stat-row">
     <div class="sc">
       <div class="sc-icon" style="background:#eff6ff;color:var(--blue)"><i class="fa-solid fa-calendar-days"></i></div>
       <div class="sc-lbl">Período</div>
       <div class="sc-val" style="font-size:1rem;margin-top:5px">${d.period_label}</div>
-      <div class="sc-sub">${d.is_current?'Más reciente':'Rentabilidad anual'}</div>
+      <div class="sc-sub">${d.date_range || (d.is_current?'Mes completo':'Rentabilidad anual')}</div>
     </div>
     <div class="sc">
       <div class="sc-icon" style="background:#f0fdf4;color:var(--green)"><i class="fa-solid fa-layer-group"></i></div>
@@ -984,16 +996,24 @@ function buildSim(d){
     <div class="cwrap"><canvas id="lineC"></canvas></div>
   </div>
   <div class="box">
-    <div class="sec-hdr" style="margin-bottom:14px">
+    <div class="sec-hdr" style="margin-bottom:10px">
       <div>
         <div class="sec-title">Últimos 24 meses · Estrategia 🅲</div>
         <div class="sec-sub">Clic en la fila para ver los fondos seleccionados</div>
       </div>
-      <span class="pill pill-real">NAV real</span>
+      <span class="pill pill-real">NAV real Morningstar</span>
+    </div>
+    <div style="background:#fffbeb;border:1px solid rgba(245,158,11,.3);border-radius:var(--rs);
+                padding:10px 14px;margin-bottom:14px;font-size:.76rem;color:#92400e;line-height:1.6">
+      <i class="fa-solid fa-triangle-exclamation" style="margin-right:5px"></i>
+      <strong>Cómo comparar con Morningstar:</strong> Los % de esta tabla son
+      <strong>rentabilidades de mes natural completo</strong> (ej. "2026-03" = 1 marzo → 31 marzo 2026).
+      En la ficha de Morningstar, usa el <strong>histórico de rentabilidades mensuales</strong>
+      del fondo, no los datos "rolling" (1 mes, 3 meses) que se calculan desde hoy y muestran un período diferente.
     </div>
     <div class="twrap"><table class="ytbl">
       <thead><tr>
-        <th>Mes</th><th class="tc">Retorno</th><th>Benchmark</th>
+        <th>Mes completo</th><th class="tc">Retorno estrategia</th><th>Benchmark</th>
         <th class="tc">Cartera</th><th class="tc">Ganancia</th><th>Top 3 ISINs</th>
       </tr></thead>
       <tbody>${rows}</tbody>

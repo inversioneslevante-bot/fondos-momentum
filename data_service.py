@@ -16,6 +16,17 @@ def _month_label(ym: str) -> str:
     except Exception:
         return ym
 
+def _month_date_range(ym: str) -> str:
+    """'2026-03' → '1 marzo 2026 – 31 marzo 2026'"""
+    try:
+        import calendar
+        y, m = int(ym.split("-")[0]), int(ym.split("-")[1])
+        last_day = calendar.monthrange(y, m)[1]
+        mes = MONTH_ES[f"{m:02d}"]
+        return f"1 {mes} {y} – {last_day} {mes} {y}"
+    except Exception:
+        return ym
+
 DB_PATH = os.environ.get(
     "FONDOS_DB_PATH",
     os.path.join(os.path.dirname(__file__), "data", "cache.db"),
@@ -38,6 +49,27 @@ def _save(sql: str, params: tuple = ()):
         con.commit()
     finally:
         con.close()
+
+
+def get_last_complete_month() -> str:
+    """
+    Return the last year_month that has near-complete fund coverage.
+    If the most recent month has < 95% of funds compared to the previous month,
+    it is considered a partial/incomplete month and we fall back to the previous one.
+    """
+    rows = _q("""
+        SELECT year_month, COUNT(*) as n
+        FROM monthly_nav WHERE return_pct IS NOT NULL
+        GROUP BY year_month ORDER BY year_month DESC LIMIT 3
+    """)
+    if not rows:
+        return None
+    latest = rows[0]
+    if len(rows) >= 2:
+        prev = rows[1]
+        if prev["n"] > 0 and latest["n"] < prev["n"] * 0.95:
+            return prev["year_month"]  # latest is partial, use previous
+    return latest["year_month"]
 
 
 # ── Top-5 ranking ─────────────────────────────────────────────────────────────
@@ -73,17 +105,30 @@ def get_top_funds_current_period() -> dict:
     if not rows:
         return {"error": "Sin datos. Importa el CSV primero."}
 
-    # Dynamic label from the actual latest data month
-    latest = _q("SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL")
-    latest_ym = latest[0]["m"] if latest and latest[0]["m"] else None
-    label = f"Último mes · {_month_label(latest_ym)}" if latest_ym else "Período actual"
+    # Use last COMPLETE month (not partial current month)
+    complete_ym = get_last_complete_month()
+    latest_ym   = _q("SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL")
+    latest_ym   = latest_ym[0]["m"] if latest_ym and latest_ym[0]["m"] else None
+
+    is_partial = (latest_ym and complete_ym and latest_ym != complete_ym)
+    ref_ym = complete_ym or latest_ym
+
+    label = f"Último mes completo · {_month_label(ref_ym)}" if ref_ym else "Período actual"
+    date_range = _month_date_range(ref_ym) if ref_ym else ""
 
     return {
-        "period": "1m",
-        "period_label": label,
-        "latest_month": latest_ym,
-        "is_current": True,
-        "data_source": "Morningstar",
+        "period":           "1m",
+        "period_label":     label,
+        "date_range":       date_range,
+        "latest_month":     ref_ym,
+        "partial_month":    latest_ym if is_partial else None,
+        "is_current":       True,
+        "data_source":      "Morningstar",
+        "morningstar_note": (
+            "Rentabilidades de mes completo (del 1 al último día del mes). "
+            "Para comparar en Morningstar, busca el historial de rentabilidades "
+            "mensuales del fondo, NO la rentabilidad rolling '1 mes'."
+        ),
         "top5": _build_top5(rows, total),
     }
 
@@ -93,7 +138,6 @@ def get_top_funds_for_year(year: int) -> dict:
     if year < today.year - 10 or year > today.year:
         return {"error": f"Año fuera de rango"}
 
-    # Use cache
     cached = _q("SELECT data FROM top5_year_cache WHERE period=?", (str(year),))
     if cached:
         return json.loads(cached[0]["data"])
@@ -117,9 +161,10 @@ def get_top_funds_for_year(year: int) -> dict:
     total = total_row[0]["n"] if total_row else 0
 
     result = {
-        "period": str(year),
+        "period":      str(year),
         "period_label": f"Año {year}",
-        "is_current": (year == today.year),
+        "date_range":  f"1 enero {year} – 31 diciembre {year}",
+        "is_current":  (year == today.year),
         "data_source": "Morningstar",
         "top5": _build_top5(rows, total),
     }
@@ -137,11 +182,12 @@ def get_available_years() -> List[int]:
 
 def get_import_status() -> dict:
     try:
-        fc   = _q("SELECT COUNT(*) AS n FROM funds")[0]["n"]
-        yrs  = get_available_years()
-        last = _q("SELECT MAX(updated_at) AS t FROM period_returns")[0]["t"]
-        nav  = _q("SELECT COUNT(DISTINCT isin) AS n FROM monthly_nav WHERE return_pct IS NOT NULL")[0]["n"]
-        latest = _q("SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL")[0]["m"]
+        fc      = _q("SELECT COUNT(*) AS n FROM funds")[0]["n"]
+        yrs     = get_available_years()
+        last    = _q("SELECT MAX(updated_at) AS t FROM period_returns")[0]["t"]
+        nav     = _q("SELECT COUNT(DISTINCT isin) AS n FROM monthly_nav WHERE return_pct IS NOT NULL")[0]["n"]
+        latest  = _q("SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL")[0]["m"]
+        complete = get_last_complete_month()
         return {
             "status":           "ok" if fc > 0 else "empty",
             "fund_count":       fc,
@@ -149,6 +195,7 @@ def get_import_status() -> dict:
             "last_update":      last,
             "funds_with_nav":   nav,
             "latest_month":     latest,
+            "complete_month":   complete,
         }
     except Exception as e:
         return {"status": "error", "fund_count": 0, "message": str(e)}
@@ -157,10 +204,8 @@ def get_import_status() -> dict:
 def get_dashboard_chart_data() -> dict:
     """
     Returns monthly return history (last 13 months) for the current top-5
-    selection and the benchmark average, so the dashboard can render a
-    'how is this month's selection performing?' chart.
+    selection and the benchmark average.
     """
-    # 1. Identify the top-5 selection (based on latest period_returns)
     top5 = _q("""
         SELECT f.isin, f.name, p.return_1m AS signal_ret
         FROM funds f JOIN period_returns p USING (isin)
@@ -170,7 +215,6 @@ def get_dashboard_chart_data() -> dict:
     if not top5:
         return {"error": "Sin datos"}
 
-    # 2. Find the 13 most recent months in monthly_nav
     months_rows = _q(
         "SELECT DISTINCT year_month FROM monthly_nav "
         "WHERE return_pct IS NOT NULL ORDER BY year_month DESC LIMIT 13"
@@ -180,10 +224,9 @@ def get_dashboard_chart_data() -> dict:
     if not months:
         return {"error": "Sin datos NAV"}
 
-    top5_isins = [f["isin"] for f in top5]
+    top5_isins   = [f["isin"] for f in top5]
     placeholders = ",".join("?" * len(top5_isins))
 
-    # 3. Monthly returns for top-5 funds
     nav_rows = _q(
         f"SELECT isin, year_month, return_pct FROM monthly_nav "
         f"WHERE isin IN ({placeholders}) AND year_month >= ? AND return_pct IS NOT NULL",
@@ -193,7 +236,6 @@ def get_dashboard_chart_data() -> dict:
     for r in nav_rows:
         fund_hist.setdefault(r["isin"], {})[r["year_month"]] = r["return_pct"]
 
-    # 4. Benchmark: average of ALL funds per month
     bench_rows = _q(
         "SELECT year_month, AVG(return_pct) AS avg_ret FROM monthly_nav "
         "WHERE year_month >= ? AND return_pct IS NOT NULL GROUP BY year_month",
@@ -211,13 +253,14 @@ def get_dashboard_chart_data() -> dict:
             "history":       [{"month": m, "return": hist.get(m)} for m in months],
         })
 
-    latest_ym = months[-1]
-    # The selection was made based on the PREVIOUS month
-    sel_month = months[-2] if len(months) >= 2 else months[-1]
+    complete_ym = get_last_complete_month()
+    latest_ym   = months[-1]
+    sel_month   = months[-2] if len(months) >= 2 else months[-1]
 
     return {
         "latest_month":    latest_ym,
-        "latest_label":    _month_label(latest_ym),
+        "complete_month":  complete_ym,
+        "latest_label":    _month_label(complete_ym or latest_ym),
         "selection_month": sel_month,
         "selection_label": _month_label(sel_month),
         "months":          months,
