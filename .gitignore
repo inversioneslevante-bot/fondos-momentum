@@ -15,8 +15,7 @@ env/
 .env
 .env.local
 
-# Database (runtime data — rebuild with import_csv.py)
-data/cache.db
+# Cloudflare binary only — DB is committed so Render deploys with real data
 
 # Cloudflare binary (downloaded automatically by start_demo.sh)
 .cloudflared
