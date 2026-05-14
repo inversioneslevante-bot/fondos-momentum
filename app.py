@@ -100,6 +100,11 @@ def index():
     return render_template("index.html", status=get_import_status())
 
 
+@app.route("/ping")
+def ping():
+    return "ok", 200
+
+
 @app.route("/api/current")
 def api_current():
     return jsonify(get_top_funds_current_period())
