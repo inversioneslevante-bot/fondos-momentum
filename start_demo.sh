@@ -40,7 +40,7 @@ fi
 
 "$CLOUDFLARED" tunnel --url "http://localhost:$PORT" 2>&1 | while IFS= read -r line; do
   if echo "$line" | grep -q "trycloudflare.com"; then
-    URL=$(echo "$line" | grep -oP 'https://[^\s]+\.trycloudflare\.com')
+    URL=$(echo "$line" | grep -oE 'https://[^ ]+\.trycloudflare\.com')
     echo ""
     echo "  ══════════════════════════════════════════════════════"
     echo "  🌐  URL PÚBLICA (comparte con tu cliente):"

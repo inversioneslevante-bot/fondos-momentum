@@ -77,7 +77,10 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False):
 
 # ── strategies A + B  (annual data) ──────────────────────────────────────────
 
-def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = 2025):
+def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None):
+    from datetime import date as _date
+    if end_year is None:
+        end_year = _date.today().year - 1  # last fully completed year
     annual_c = monthly_c * 12
 
     # One bulk query — all years including signal year (start_year-1)
@@ -139,34 +142,47 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = 2025)
                       "bench_value": round(benchB, 2),
                       "profit_vs_cost": round(portB - invested, 2)})
 
-    # Partial 2026 (March 1m return) — signal = 2025 top-5
-    top5_25 = _q("""
+    # Partial current year — signal = end_year top-5, return = latest period_returns
+    latest_ym_row = _q(
+        "SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL"
+    )
+    latest_ym = latest_ym_row[0]["m"] if latest_ym_row and latest_ym_row[0]["m"] else None
+
+    top5_signal = _q("""
         SELECT a.isin, a.return_pct AS sig_ret,
                f.name, f.category_mediolanum AS cat, p.return_1m
         FROM annual_returns a JOIN funds f USING (isin)
         LEFT JOIN period_returns p USING (isin)
-        WHERE a.year = 2025 AND a.return_pct IS NOT NULL
+        WHERE a.year = ? AND a.return_pct IS NOT NULL
         ORDER BY a.return_pct DESC LIMIT 5
-    """)
-    cur_1m = [r["return_1m"] for r in top5_25 if r["return_1m"] is not None]
+    """, (end_year,))
+    cur_1m = [r["return_1m"] for r in top5_signal if r["return_1m"] is not None]
     b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
     b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
 
-    if cur_1m:
+    if cur_1m and latest_ym:
         r1m = sum(cur_1m) / len(cur_1m)
         portA  *= (1 + r1m / 100);  benchA  *= (1 + b1m / 100)
         portB   = (portB  + monthly_c) * (1 + r1m / 100)
         benchB  = (benchB + monthly_c) * (1 + b1m / 100)
         invested += monthly_c
 
+        # Human-readable label: "2026 (May)"
+        MONTHS_SHORT = {
+            "01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
+            "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic",
+        }
+        ym_parts = latest_ym.split("-")
+        partial_label = f"{ym_parts[0]} ({MONTHS_SHORT.get(ym_parts[1], ym_parts[1])})"
+
         partial_funds = [{
             "isin": r["isin"], "name": r["name"], "category": r["cat"],
             "signal_return": round(r["sig_ret"], 2),
             "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
-        } for r in top5_25]
+        } for r in top5_signal]
 
         pbase = {
-            "year": "2026 (Mar)", "period": "2026 (Mar)", "ret": r1m,
+            "year": partial_label, "period": partial_label, "ret": r1m,
             "strategy_return": round(r1m, 2), "benchmark_return": round(b1m, 2),
             "total_invested": round(invested, 2), "n_funds": len(cur_1m),
             "funds_selected": partial_funds,

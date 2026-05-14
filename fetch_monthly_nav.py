@@ -63,9 +63,17 @@ def _get_all_isins() -> List[Tuple[str, str]]:
 
 
 def _already_fetched(isin: str) -> bool:
+    """Return True only if the fund has NAV data from within the last ~35 days.
+    This ensures monthly re-fetches happen automatically when new data is available."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=35)).strftime("%Y-%m")
     con = sqlite3.connect(DB_PATH)
     try:
-        return con.execute("SELECT COUNT(*) FROM monthly_nav WHERE isin=?", (isin,)).fetchone()[0] >= 20
+        latest = con.execute(
+            "SELECT MAX(year_month) FROM monthly_nav WHERE isin=? AND return_pct IS NOT NULL",
+            (isin,),
+        ).fetchone()[0]
+        return latest is not None and latest >= cutoff
     finally:
         con.close()
 
