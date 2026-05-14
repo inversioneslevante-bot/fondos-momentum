@@ -271,6 +271,117 @@ def _monthly_compound(monthly_c: float, start_ym: str = None):
     return {"summary": s, "monthly": periods}
 
 
+# ── strategies D + E  (N-month lookback momentum) ────────────────────────────
+
+def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = None):
+    """
+    Select top-5 funds each month by their compound return over the last
+    `lookback` months (e.g. 12 for Strategy D, 6 for Strategy E).
+    Uses ALL historical data for signal calculation; portfolio accumulation
+    begins from start_ym (or from the first month that has enough history).
+    """
+    rows = _q("""
+        SELECT m.isin, m.year_month, m.return_pct,
+               f.name, f.category_mediolanum AS cat
+        FROM monthly_nav m JOIN funds f USING (isin)
+        WHERE m.return_pct IS NOT NULL
+        ORDER BY m.year_month
+    """)
+
+    if not rows:
+        return {"error": "Sin datos mensuales."}
+
+    # Build lookup structures once
+    by_month: Dict[str, List[Dict]] = {}
+    fund_ret: Dict[str, Dict[str, float]] = {}  # isin → {year_month: return_pct}
+    fund_meta: Dict[str, Dict] = {}
+
+    for r in rows:
+        by_month.setdefault(r["year_month"], []).append(r)
+        fund_ret.setdefault(r["isin"], {})[r["year_month"]] = r["return_pct"]
+        if r["isin"] not in fund_meta:
+            fund_meta[r["isin"]] = {"name": r["name"], "cat": r["cat"]}
+
+    months = sorted(by_month)
+
+    # First investment index: need `lookback` months of signal history
+    invest_start = lookback
+    if start_ym:
+        for i, m in enumerate(months):
+            if m >= start_ym:
+                invest_start = max(invest_start, i)
+                break
+
+    if invest_start >= len(months):
+        return {"error": "Datos insuficientes para el período seleccionado."}
+
+    port = bench = invested = 0.0
+    periods: List[Dict] = []
+
+    for i in range(invest_start, len(months)):
+        cur = months[i]
+        sig_window = months[i - lookback: i]  # lookback months used as signal
+
+        # Compute compound return over signal window for every fund
+        scores: Dict[str, float] = {}
+        for isin, month_rets in fund_ret.items():
+            rets = [month_rets[m] for m in sig_window if m in month_rets]
+            if len(rets) < max(1, lookback // 2):
+                continue
+            v = 1.0
+            for r in rets:
+                v *= 1 + r / 100
+            scores[isin] = (v - 1) * 100
+
+        if not scores:
+            continue
+
+        top5_isins = sorted(scores, key=scores.__getitem__, reverse=True)[:5]
+
+        curr_lut  = {r["isin"]: r["return_pct"] for r in by_month[cur]}
+        bench_all = [r["return_pct"] for r in by_month[cur]]
+        actual    = [curr_lut[isin] for isin in top5_isins if isin in curr_lut]
+
+        if not actual:
+            continue
+
+        sr = sum(actual)    / len(actual)
+        br = sum(bench_all) / len(bench_all)
+
+        port  = (port  + monthly_c) * (1 + sr / 100)
+        bench = (bench + monthly_c) * (1 + br / 100)
+        invested += monthly_c
+
+        periods.append({
+            "month":            cur,
+            "signal_window":    f"{sig_window[0]} → {sig_window[-1]}",
+            "period":           cur,
+            "ret":              sr,
+            "strategy_return":  round(sr, 3),
+            "benchmark_return": round(br, 3),
+            "portfolio_value":  round(port,     2),
+            "bench_value":      round(bench,    2),
+            "total_invested":   round(invested, 2),
+            "profit":           round(port - invested, 2),
+            "n_funds":          len(actual),
+            "top5": [{
+                "isin":          isin,
+                "name":          fund_meta[isin]["name"],
+                "category":      fund_meta[isin]["cat"],
+                "signal_return": round(scores[isin], 2),
+                "actual_return": round(curr_lut[isin], 2) if isin in curr_lut else None,
+            } for isin in top5_isins],
+        })
+
+    if not periods:
+        return {"error": "Sin datos suficientes para el período seleccionado."}
+
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True)
+    s["date_range"]      = f"{periods[0]['month']} → {periods[-1]['month']}"
+    s["lookback_months"] = lookback
+    return {"summary": s, "monthly": periods}
+
+
 # ── public entry ──────────────────────────────────────────────────────────────
 
 def run_all(monthly_contribution: float = 1_000.0,
@@ -290,11 +401,15 @@ def run_all(monthly_contribution: float = 1_000.0,
 
     ab = _annual_both(monthly_contribution, start_year=start_year)
     c  = _monthly_compound(monthly_contribution, start_ym=start_ym)
+    d  = _monthly_compound_lookback(monthly_contribution, 12, start_ym=start_ym)
+    e  = _monthly_compound_lookback(monthly_contribution,  6, start_ym=start_ym)
 
     return {
         "strategy_a":  ab["strategy_a"],
         "strategy_b":  ab["strategy_b"],
         "strategy_c":  c,
+        "strategy_d":  d,
+        "strategy_e":  e,
         "monthly":     monthly_contribution,
         "start_year":  start_year,
         "start_month": start_month,
