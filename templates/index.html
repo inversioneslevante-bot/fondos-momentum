@@ -388,14 +388,33 @@
       <div class="panel" id="panel-sim">
         <div class="disc">
           <strong>⚠ Datos reales Morningstar.</strong>
-          🅲 usa NAV mensual real (2016→2026). 🅰 y 🅱 usan rentabilidades anuales del CSV.
+          🅲 usa NAV mensual real desde el mes seleccionado (disponible desde Mar 2016).
+          🅰 y 🅱 usan rentabilidades anuales desde el año seleccionado.
           Rentabilidades pasadas no garantizan resultados futuros.
         </div>
         <div class="box">
           <h3><i class="fa-solid fa-sliders" style="color:var(--accent)"></i> Configurar simulación</h3>
           <div class="srow">
             <div class="sgrp"><label>Aportación mensual (€)</label><input type="number" id="inputM" value="1000" min="100" step="100"/></div>
-            <button class="btn green" id="btnSim" onclick="runSim()"><i class="fa-solid fa-play"></i> Calcular 3 estrategias</button>
+            <div class="sgrp">
+              <label>Inicio de inversión</label>
+              <div style="display:flex;gap:8px">
+                <select id="selStartMonth" style="min-width:110px">
+                  <option value="1">Enero</option><option value="2">Febrero</option>
+                  <option value="3">Marzo</option><option value="4">Abril</option>
+                  <option value="5">Mayo</option><option value="6">Junio</option>
+                  <option value="7">Julio</option><option value="8">Agosto</option>
+                  <option value="9">Septiembre</option><option value="10">Octubre</option>
+                  <option value="11">Noviembre</option><option value="12">Diciembre</option>
+                </select>
+                <select id="selStartYear" style="min-width:90px"></select>
+              </div>
+            </div>
+            <button class="btn green" id="btnSim" onclick="runSim()"><i class="fa-solid fa-play"></i> Calcular</button>
+          </div>
+          <div id="simPeriodInfo" style="margin-top:12px;font-size:.78rem;color:var(--muted);display:none">
+            <i class="fa-solid fa-circle-info" style="color:var(--accent)"></i>
+            <span id="simPeriodText"></span>
           </div>
         </div>
         <div id="div-sim"><div class="loading"><div class="spin"></div><p>Calculando…</p></div></div>
@@ -558,13 +577,34 @@ async function loadCurrent(){
 
 async function populateYears(){
   const d = await fetch('/api/available-years').then(r=>r.json());
+  const years = d.years || [];
+
+  // Histórico selector
   const sel = document.getElementById('selYear');
   sel.innerHTML = '';
-  (d.years||[]).forEach(y=>{
+  years.forEach(y=>{
     const o = document.createElement('option'); o.value=y; o.textContent=y; sel.appendChild(o);
   });
-  const pref = (d.years||[]).find(y=>y===2024)||(d.years||[])[0];
+  const pref = years.find(y=>y===2024) || years[0];
   if(pref) sel.value = pref;
+
+  // Simulation start-year selector (ascending, exclude current year)
+  const selSY = document.getElementById('selStartYear');
+  selSY.innerHTML = '';
+  const curY = new Date().getFullYear();
+  const simYears = [...years].reverse().filter(y => y < curY);
+  simYears.forEach(y=>{
+    const o = document.createElement('option');
+    o.value = y;
+    const age = curY - y;
+    if(y === 2016)      o.textContent = `${y} · ~10 años`;
+    else if(y < 2016)   o.textContent = `${y} · ${age} años (máx.)`;
+    else                o.textContent = `${y} · ~${age} año${age!==1?'s':''}`;
+    selSY.appendChild(o);
+  });
+  // Default: 2016 (start of monthly NAV data, ~10yr history)
+  const defaultSY = simYears.find(y => y === 2016) || simYears[0];
+  if(defaultSY) selSY.value = defaultSY;
 }
 
 async function searchYear(){
@@ -589,24 +629,38 @@ async function searchYear(){
 // ── Simulation ────────────────────────────────────────────────
 let _charts = {};
 
+const MONTHS_ES = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
 async function runSim(){
   window._simLoaded = true;
-  const m = parseFloat(document.getElementById('inputM').value)||1000;
+  const m          = parseFloat(document.getElementById('inputM').value)||1000;
+  const startYear  = parseInt(document.getElementById('selStartYear')?.value  || 0) || null;
+  const startMonth = parseInt(document.getElementById('selStartMonth')?.value || 1);
   const btn = document.getElementById('btnSim');
   const div = document.getElementById('div-sim');
   btn.disabled=true;
   btn.innerHTML='<div class="spin" style="width:15px;height:15px;border-width:2px"></div> Calculando…';
-  div.innerHTML=`<div class="loading"><div class="spin"></div><p>Simulando 3 estrategias…</p></div>`;
+  div.innerHTML=`<div class="loading"><div class="spin"></div><p>Simulando estrategias desde ${MONTHS_ES[startMonth]} ${startYear||''}…</p></div>`;
   try{
-    const d = await fetch(`/api/backtest-all?monthly=${m}`).then(r=>r.json());
+    const url = `/api/backtest-all?monthly=${m}${startYear?`&start_year=${startYear}`:''}${startMonth!==1?`&start_month=${startMonth}`:''}`;
+    const d = await fetch(url).then(r=>r.json());
     if(d.error) throw new Error(d.error);
+    // Show period info bar
+    const info = document.getElementById('simPeriodInfo');
+    const txt  = document.getElementById('simPeriodText');
+    if(info && txt && d.start_year){
+      const c = d.strategy_c?.summary;
+      const range = c?.date_range || '';
+      txt.textContent = `Período simulado: ${MONTHS_ES[d.start_month]} ${d.start_year} → hoy${range?' ('+range+')':''}`;
+      info.style.display = 'block';
+    }
     div.innerHTML = buildSim(d);
     renderCharts(d);
   } catch(e){
     div.innerHTML=`<div class="err"><i class="fa-solid fa-triangle-exclamation"></i><br>${e.message}</div>`;
   } finally{
     btn.disabled=false;
-    btn.innerHTML='<i class="fa-solid fa-play"></i> Calcular 3 estrategias';
+    btn.innerHTML='<i class="fa-solid fa-play"></i> Calcular';
   }
 }
 
@@ -614,6 +668,11 @@ function buildSim(d){
   const A=d.strategy_a.summary, B=d.strategy_b.summary, C=d.strategy_c.summary;
   const winC = C.final_value>=A.final_value && C.final_value>=B.final_value;
   const winB = !winC && B.final_value>=A.final_value;
+
+  // Period badge for header cards
+  const periodStr = d.start_year
+    ? `Desde ${MONTHS_ES[d.start_month||1]} ${d.start_year}`
+    : '';
 
   const hcard=(cls,label,s,isC=false,winner=false)=>`<div class="hcard ${cls}">
     ${winner?'<div class="winner-tag">✅ MEJOR</div>':''}
@@ -626,6 +685,7 @@ function buildSim(d){
       <div><div class="hdlbl">Retorno</div><div class="hdval">${fe(s.total_return_pct,1)}</div></div>
       <div><div class="hdlbl">CAGR</div><div class="hdval">${fe(s.cagr_pct,1)}</div></div>
     </div>
+    ${periodStr?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--brd);font-size:.7rem;color:var(--muted)">${periodStr}</div>`:''}
   </div>`;
 
   const kpis=`<div class="kpi-row">

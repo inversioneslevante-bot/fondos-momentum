@@ -202,7 +202,7 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None)
 
 # ── strategy C  (real monthly NAV data) ──────────────────────────────────────
 
-def _monthly_compound(monthly_c: float):
+def _monthly_compound(monthly_c: float, start_ym: str = None):
     # ONE bulk query instead of ~860 individual queries
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
@@ -220,8 +220,13 @@ def _monthly_compound(monthly_c: float):
         by_month.setdefault(r["year_month"], []).append(r)
 
     months = sorted(by_month)
+
+    # Apply start filter — keep start_ym as the first *signal* month
+    if start_ym:
+        months = [m for m in months if m >= start_ym]
+
     if len(months) < 3:
-        return {"error": "Datos insuficientes"}
+        return {"error": "Datos insuficientes para el período seleccionado. Elige una fecha de inicio anterior."}
 
     port = bench = invested = 0.0
     periods: List[Dict] = []
@@ -268,14 +273,32 @@ def _monthly_compound(monthly_c: float):
 
 # ── public entry ──────────────────────────────────────────────────────────────
 
-def run_all(monthly_contribution: float = 1_000.0) -> dict:
-    ab = _annual_both(monthly_contribution)
-    c  = _monthly_compound(monthly_contribution)
+def run_all(monthly_contribution: float = 1_000.0,
+            start_year: int = None,
+            start_month: int = 1) -> dict:
+    from datetime import date as _date
+
+    # Default: earliest year with annual data (≈ 2016)
+    if start_year is None:
+        earliest = _q(
+            "SELECT MIN(year) AS y FROM annual_returns WHERE return_pct IS NOT NULL"
+        )
+        start_year = earliest[0]["y"] if earliest and earliest[0]["y"] else 2016
+
+    start_month = max(1, min(12, int(start_month)))
+    start_ym = f"{start_year}-{start_month:02d}"
+
+    ab = _annual_both(monthly_contribution, start_year=start_year)
+    c  = _monthly_compound(monthly_contribution, start_ym=start_ym)
+
     return {
-        "strategy_a": ab["strategy_a"],
-        "strategy_b": ab["strategy_b"],
-        "strategy_c": c,
-        "monthly":    monthly_contribution,
+        "strategy_a":  ab["strategy_a"],
+        "strategy_b":  ab["strategy_b"],
+        "strategy_c":  c,
+        "monthly":     monthly_contribution,
+        "start_year":  start_year,
+        "start_month": start_month,
+        "start_ym":    start_ym,
     }
 
 

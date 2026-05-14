@@ -131,11 +131,17 @@ def api_dashboard_chart():
 @app.route("/api/backtest-all")
 def api_backtest_all():
     try:
-        monthly = float(request.args.get("monthly", 1000))
+        monthly      = float(request.args.get("monthly", 1000))
+        start_year   = int(request.args.get("start_year",  0)) or None
+        start_month  = int(request.args.get("start_month", 1))
     except (ValueError, TypeError):
-        monthly = 1000.0
+        monthly, start_year, start_month = 1000.0, None, 1
     from backtest import run_all
-    return jsonify(run_all(monthly_contribution=monthly))
+    return jsonify(run_all(
+        monthly_contribution=monthly,
+        start_year=start_year,
+        start_month=start_month,
+    ))
 
 
 # ── Data management ───────────────────────────────────────────────────────────
