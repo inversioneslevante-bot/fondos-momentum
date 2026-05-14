@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+@app.after_request
+def no_cache(response):
+    if request.path.startswith("/api/") or request.path == "/ping":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 # ── Auto-sync on startup ──────────────────────────────────────────────────────
 
 def _startup_sync():
