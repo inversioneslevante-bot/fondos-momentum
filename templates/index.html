@@ -294,6 +294,49 @@
     .kpi-val{font-size:1.35rem;font-weight:800;margin-top:3px;line-height:1}
     .kpi-sub{font-size:.7rem;color:var(--muted);margin-top:4px}
 
+    /* ── Sources modal ────────────────────────────────────── */
+    .modal-overlay{
+      display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);
+      z-index:1000;align-items:center;justify-content:center;padding:20px;
+    }
+    .modal-overlay.open{display:flex}
+    .modal{
+      background:var(--card);border-radius:var(--r);
+      width:100%;max-width:600px;max-height:88vh;overflow-y:auto;
+      box-shadow:0 20px 60px rgba(0,0,0,.25);
+    }
+    .modal-hdr{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:22px 26px 18px;border-bottom:1px solid var(--brd);
+      position:sticky;top:0;background:var(--card);z-index:1;
+    }
+    .modal-hdr h2{font-size:1.05rem;font-weight:700;color:var(--txt)}
+    .modal-close{
+      width:32px;height:32px;border-radius:50%;border:none;
+      background:#f3f4f6;cursor:pointer;font-size:1rem;
+      display:grid;place-items:center;color:var(--muted);transition:var(--tr);
+    }
+    .modal-close:hover{background:var(--brd);color:var(--txt)}
+    .modal-body{padding:24px 26px}
+    .src-block{
+      display:flex;gap:16px;padding:18px 0;
+      border-bottom:1px solid var(--brd);
+    }
+    .src-block:last-child{border-bottom:none;padding-bottom:0}
+    .src-icon{
+      width:44px;height:44px;border-radius:10px;flex-shrink:0;
+      display:grid;place-items:center;font-size:1.2rem;
+    }
+    .src-content h3{font-size:.9rem;font-weight:700;color:var(--txt);margin-bottom:5px}
+    .src-content p{font-size:.82rem;color:var(--muted);line-height:1.65}
+    .src-content a{color:var(--accent);text-decoration:none}
+    .src-content a:hover{text-decoration:underline}
+    .src-tag{
+      display:inline-flex;align-items:center;gap:4px;
+      font-size:.68rem;font-weight:700;padding:2px 9px;border-radius:20px;
+      margin-top:7px;
+    }
+
     footer{
       background:var(--card);border-top:1px solid var(--brd);
       text-align:center;font-size:.72rem;color:var(--muted);
@@ -347,6 +390,9 @@
 
     <div class="sb-sep"></div>
     <div class="sb-section">Info</div>
+    <button class="sb-item" onclick="openSources()">
+      <i class="fa-solid fa-circle-info"></i> Fuentes de datos
+    </button>
     <a class="sb-item" href="https://www.morningstar.es" target="_blank">
       <i class="fa-solid fa-arrow-up-right-from-square"></i> Morningstar
     </a>
@@ -456,10 +502,83 @@
 
     <footer>
       Datos: <strong>Morningstar</strong> · <span id="fc">—</span> fondos · <span id="navCount">—</span> con NAV mensual ·
+      <button onclick="openSources()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:.72rem;font-family:inherit;text-decoration:underline">¿De dónde vienen los datos?</button> ·
       <span>⚠ Solo uso interno · No asesoramiento de inversión</span>
     </footer>
   </div><!-- /main -->
 </div><!-- /layout -->
+
+<!-- ══ SOURCES MODAL ══════════════════════════════════════════ -->
+<div class="modal-overlay" id="sourcesModal" onclick="if(event.target===this)closeSources()">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h2><i class="fa-solid fa-circle-info" style="color:var(--accent);margin-right:8px"></i>Fuentes de datos</h2>
+      <button class="modal-close" onclick="closeSources()">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <div class="src-block">
+        <div class="src-icon" style="background:#fff7ed;color:#ea580c">🏦</div>
+        <div class="src-content">
+          <h3>Universo de fondos — Mediolanum</h3>
+          <p>La selección de <strong id="srcFundCount">473</strong> fondos de inversión UCITS proviene del catálogo de
+          <strong>Banco Mediolanum</strong>, extraído de los informes mensuales de rentabilidad internos
+          (fichero CSV con ISIN, nombre, categoría y rentabilidades históricas por año).</p>
+          <p style="margin-top:6px">Son fondos disponibles en la plataforma Mediolanum, incluyendo fondos propios
+          (Challenge, Best Brands) y fondos de terceros seleccionados (BlackRock, Fidelity, Vontobel, Franklin Templeton…)</p>
+          <span class="src-tag" style="background:#fff7ed;color:#ea580c">
+            <i class="fa-solid fa-file-csv"></i> CSV mensual Mediolanum
+          </span>
+        </div>
+      </div>
+
+      <div class="src-block">
+        <div class="src-icon" style="background:#f0fdf4;color:#16a34a">📈</div>
+        <div class="src-content">
+          <h3>NAV histórico mensual — Morningstar</h3>
+          <p>Los precios de valor liquidativo (NAV) mensuales de cada fondo provienen de
+          <strong><a href="https://www.morningstar.es" target="_blank">Morningstar</a></strong>,
+          el proveedor de datos financieros independiente más reconocido del mundo.</p>
+          <p style="margin-top:6px">Se obtienen a través de la metodología <em>Growth of 10,000</em> — el crecimiento
+          de una inversión hipotética de 10.000€ mes a mes — que permite calcular con precisión
+          la rentabilidad mensual real de cada fondo desde <strong id="srcDateRange">Marzo 2016</strong>.</p>
+          <p style="margin-top:6px">Morningstar es utilizado por gestores de fondos, bancos y reguladores
+          en todo el mundo como referencia estándar de datos de mercado.</p>
+          <span class="src-tag" style="background:#f0fdf4;color:#16a34a">
+            <i class="fa-solid fa-database"></i> <span id="srcNavCount">470</span> fondos con NAV mensual
+          </span>
+          <span class="src-tag" style="background:#eff6ff;color:#2563eb;margin-left:6px">
+            <i class="fa-solid fa-calendar"></i> Actualización mensual automática
+          </span>
+        </div>
+      </div>
+
+      <div class="src-block">
+        <div class="src-icon" style="background:#f5f3ff;color:#7c3aed">⚙️</div>
+        <div class="src-content">
+          <h3>Cálculos de simulación — Elaboración propia</h3>
+          <p>Las simulaciones de las <strong>5 estrategias de momentum</strong> son de
+          elaboración propia, desarrolladas sobre los datos reales de Morningstar.</p>
+          <p style="margin-top:6px">Metodología: selección mensual de los 5 fondos con mejor rentabilidad
+          en el período de señal (1 mes, 6 meses o 12 meses), reinversión del 100% del capital
+          más la aportación mensual, sin costes de transacción. Los resultados son históricos
+          y <strong>no garantizan rentabilidades futuras</strong>.</p>
+          <span class="src-tag" style="background:#f5f3ff;color:#7c3aed">
+            <i class="fa-solid fa-calculator"></i> Backtest 2016–2026 · Sin lookahead bias
+          </span>
+        </div>
+      </div>
+
+      <div style="background:#fafafa;border-radius:var(--rs);padding:14px 16px;margin-top:6px;font-size:.78rem;color:var(--muted);line-height:1.6">
+        <strong style="color:var(--txt)">⚠ Aviso legal</strong><br>
+        Esta herramienta es de uso interno exclusivo para asesores de Banco Mediolanum.
+        Los datos y simulaciones tienen carácter informativo y no constituyen asesoramiento
+        de inversión. Rentabilidades pasadas no garantizan resultados futuros.
+      </div>
+
+    </div>
+  </div>
+</div>
 
 <script>
 const fe  = (v,d=2)=>v!=null?(v>=0?`+${v.toFixed(d)}%`:`${v.toFixed(d)}%`):'—';
@@ -483,15 +602,28 @@ function go(t){
   if(t==='sim' && !window._simLoaded) runSim();
 }
 
+function openSources(){ document.getElementById('sourcesModal').classList.add('open'); }
+function closeSources(){ document.getElementById('sourcesModal').classList.remove('open'); }
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeSources(); });
+
 async function checkStatus(){
   const d = await fetch('/api/import-status').then(r=>r.json());
   const fc = d.fund_count||0, nav = d.funds_with_nav||0;
+  const latest = d.latest_month || '';
   document.getElementById('statusLabel').textContent = fc>0 ? `${fc} fondos activos` : 'Sin datos';
   document.getElementById('importBanner').style.display = fc>0 ? 'none' : 'flex';
   document.getElementById('fc').textContent = fc;
   document.getElementById('navCount').textContent = nav;
   document.getElementById('sbCount').textContent = `${fc} fondos`;
   document.getElementById('sbNav').textContent = `${nav} con NAV mensual`;
+  // Update modal dynamic values
+  if(fc) document.getElementById('srcFundCount').textContent = fc;
+  if(nav) document.getElementById('srcNavCount').textContent = nav;
+  if(latest){
+    const [y,m] = latest.split('-');
+    const MESES = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    document.getElementById('srcDateRange').textContent = `Marzo 2016 hasta ${MESES[parseInt(m)]} ${y}`;
+  }
 }
 
 async function triggerImport(){
