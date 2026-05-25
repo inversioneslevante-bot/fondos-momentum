@@ -40,7 +40,16 @@ def _startup_sync():
 
 
 def _startup_benchmarks():
-    """Download S&P 500 and other benchmark data if missing or stale."""
+    """Ensure the benchmark table exists (sync), then fetch data in background."""
+    # Create table synchronously so backtest queries never fail on missing table
+    try:
+        from fetch_benchmark import _ensure_table
+        _ensure_table()
+        logger.info("Startup: benchmark_returns table ready.")
+    except Exception as e:
+        logger.error(f"Startup: could not create benchmark table: {e}")
+
+    # Download/update data in background (may take a few seconds)
     import threading
     def _run():
         try:
@@ -173,18 +182,23 @@ def api_backtest_all():
         end_year, end_month, mode, initial_cap, risk_free_rate = None, None, "monthly", 0.0, 2.0
         benchmark_ticker = "avg"
     lump_sum = (mode == "lump_sum")
-    from backtest import run_all
-    return jsonify(run_all(
-        monthly_contribution=0.0 if lump_sum else monthly,
-        start_year=start_year,
-        start_month=start_month,
-        end_year=end_year,
-        end_month=end_month,
-        lump_sum=lump_sum,
-        initial_capital=initial_cap if lump_sum else 0.0,
-        risk_free_rate=risk_free_rate,
-        benchmark_ticker=benchmark_ticker,
-    ))
+    try:
+        from backtest import run_all
+        result = run_all(
+            monthly_contribution=0.0 if lump_sum else monthly,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=end_year,
+            end_month=end_month,
+            lump_sum=lump_sum,
+            initial_capital=initial_cap if lump_sum else 0.0,
+            risk_free_rate=risk_free_rate,
+            benchmark_ticker=benchmark_ticker,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Backtest error: {e}", exc_info=True)
+        return jsonify({"error": f"Error al calcular la simulación: {e}"}), 500
 
 
 # ── Data management ───────────────────────────────────────────────────────────

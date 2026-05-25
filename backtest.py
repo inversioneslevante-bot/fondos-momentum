@@ -104,14 +104,18 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, l
 # ── benchmark helpers ─────────────────────────────────────────────────────────
 
 def _bench_monthly(ticker: str) -> dict:
-    """Return {year_month: return_pct} for an external benchmark ticker."""
+    """Return {year_month: return_pct} for an external benchmark ticker.
+    Returns {} silently if the table doesn't exist yet or any DB error occurs."""
     if not ticker or ticker == "avg":
         return {}
-    rows = _q(
-        "SELECT year_month, return_pct FROM benchmark_returns WHERE ticker=? AND return_pct IS NOT NULL",
-        (ticker,),
-    )
-    return {r["year_month"]: r["return_pct"] for r in rows}
+    try:
+        rows = _q(
+            "SELECT year_month, return_pct FROM benchmark_returns WHERE ticker=? AND return_pct IS NOT NULL",
+            (ticker,),
+        )
+        return {r["year_month"]: r["return_pct"] for r in rows}
+    except Exception:
+        return {}
 
 
 def _bench_annual(ticker: str) -> dict:
