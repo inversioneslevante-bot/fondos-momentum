@@ -147,13 +147,14 @@ def api_backtest_all():
         monthly       = float(request.args.get("monthly", 1000))
         start_year    = int(request.args.get("start_year",  0)) or None
         start_month   = int(request.args.get("start_month", 1))
-        end_year      = int(request.args.get("end_year",   0)) or None
-        end_month     = int(request.args.get("end_month",  0)) or None
-        mode          = request.args.get("mode", "monthly")
-        initial_cap   = float(request.args.get("initial_capital", 0))
+        end_year        = int(request.args.get("end_year",        0))   or None
+        end_month       = int(request.args.get("end_month",       0))   or None
+        mode            = request.args.get("mode", "monthly")
+        initial_cap     = float(request.args.get("initial_capital", 0))
+        risk_free_rate  = float(request.args.get("risk_free_rate",  2.0))
     except (ValueError, TypeError):
         monthly, start_year, start_month = 1000.0, None, 1
-        end_year, end_month, mode, initial_cap = None, None, "monthly", 0.0
+        end_year, end_month, mode, initial_cap, risk_free_rate = None, None, "monthly", 0.0, 2.0
     lump_sum = (mode == "lump_sum")
     from backtest import run_all
     return jsonify(run_all(
@@ -164,6 +165,7 @@ def api_backtest_all():
         end_month=end_month,
         lump_sum=lump_sum,
         initial_capital=initial_cap if lump_sum else 0.0,
+        risk_free_rate=risk_free_rate,
     ))
 
 

@@ -520,6 +520,10 @@
                 <select id="selEndYear" style="min-width:90px"></select>
               </div>
             </div>
+            <div class="sgrp">
+              <label>Tasa libre de riesgo (%)</label>
+              <input type="number" id="inputRFR" value="2" min="0" max="15" step="0.5" style="width:110px" title="Usada para calcular el Ratio de Sharpe"/>
+            </div>
             <button class="btn green" id="btnSim" onclick="runSim()"><i class="fa-solid fa-play"></i> Calcular</button>
           </div>
           <div id="simPeriodInfo" style="margin-top:12px;font-size:.78rem;color:var(--muted);display:none">
@@ -872,6 +876,7 @@ async function runSim(){
   const startMonth = parseInt(document.getElementById('selStartMonth')?.value || 1);
   const endYear    = parseInt(document.getElementById('selEndYear')?.value    || 0) || null;
   const endMonth   = parseInt(document.getElementById('selEndMonth')?.value   || 1);
+  const rfr        = parseFloat(document.getElementById('inputRFR')?.value ?? 2) || 2;
   const btn = document.getElementById('btnSim');
   const div = document.getElementById('div-sim');
   btn.disabled=true;
@@ -887,6 +892,7 @@ async function runSim(){
     if(startYear)         url += `&start_year=${startYear}`;
     if(startMonth !== 1)  url += `&start_month=${startMonth}`;
     if(endYear)           url += `&end_year=${endYear}&end_month=${endMonth}`;
+    url += `&risk_free_rate=${rfr}`;
     const d = await fetch(url).then(r=>r.json());
     if(d.error) throw new Error(d.error);
     // Show period info bar
@@ -987,8 +993,10 @@ function buildSim(d){
   };
 
   let _infoId = 0;
+  const sharpeColor = v => v >= 1 ? 'var(--green)' : v >= 0.5 ? 'var(--gold)' : v >= 0 ? 'var(--txt)' : 'var(--red)';
   const hcard=(cls,label,s,isC=false,winner=false,infoKey='a')=>{
     const id = `inf-${++_infoId}`;
+    const rfLabel = d.risk_free_rate != null ? `rf ${d.risk_free_rate}%` : 'rf 2%';
     return `<div class="hcard ${cls}">
     ${winner?'<div class="winner-tag">✅ MEJOR</div>':''}
     ${isC?`<div class="real-tag" style="top:${winner?36:12}px;right:13px">📊 NAV Real</div>`:''}
@@ -999,6 +1007,12 @@ function buildSim(d){
       <div><div class="hdlbl">Ganancia</div><div class="hdval" style="color:${s.profit>=0?'var(--green)':'var(--red)'}">${fe2(s.profit)}</div></div>
       <div><div class="hdlbl">Retorno</div><div class="hdval">${fe(s.total_return_pct,1)}</div></div>
       <div><div class="hdlbl">CAGR</div><div class="hdval">${fe(s.cagr_pct,1)}</div></div>
+    </div>
+    <div class="hdet" style="border-top:1px dashed var(--brd);margin-top:0;padding-top:10px">
+      <div><div class="hdlbl">Volatilidad anual</div><div class="hdval" style="color:var(--muted)">${s.volatility_pct!=null?s.volatility_pct.toFixed(1)+'%':'—'}</div></div>
+      <div><div class="hdlbl">Sharpe (${rfLabel})</div><div class="hdval" style="color:${sharpeColor(s.sharpe_ratio)}">${s.sharpe_ratio!=null?s.sharpe_ratio.toFixed(2):'—'}</div></div>
+      <div><div class="hdlbl">Max Drawdown</div><div class="hdval" style="color:var(--red)">${s.max_drawdown_pct!=null?'-'+s.max_drawdown_pct.toFixed(1)+'%':'—'}</div></div>
+      <div><div class="hdlbl">vs Benchmark</div><div class="hdval" style="color:${s.bench_return_pct!=null&&s.total_return_pct>s.bench_return_pct?'var(--green)':'var(--red)'}">${s.bench_return_pct!=null?fe(s.total_return_pct-s.bench_return_pct,1):'—'}</div></div>
     </div>
     ${periodStr?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--brd);font-size:.7rem;color:var(--muted)">${periodStr}</div>`:''}
     <button class="info-btn" onclick="toggleInfo(this,'${id}')">

@@ -12,8 +12,9 @@ New parameters:
   lump_sum              — one-time investment, no ongoing contributions
   initial_capital       — initial amount for lump-sum mode
 """
-import os, sqlite3
+import os, sqlite3, math
 from datetime import date as _date
+from statistics import stdev as _stdev, mean as _mean
 from typing import Dict, List
 
 DB_PATH = os.environ.get(
@@ -33,7 +34,7 @@ def _q(sql: str, params: tuple = ()) -> List[Dict]:
         con.close()
 
 
-def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, lump_sum=False):
+def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, lump_sum=False, risk_free_rate=2.0):
     profit  = port - invested
     n       = len(periods)
     annexp  = 12 / n if (is_monthly and n) else (1 / n if n else 1)
@@ -51,6 +52,22 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, l
         if dd > max_dd:
             max_dd = dd
 
+    # Volatility and Sharpe ratio
+    rets = [p.get("ret", 0) for p in periods]
+    if len(rets) >= 2:
+        vol_period = _stdev(rets)                              # std dev of period returns (%)
+        vol_annual = vol_period * math.sqrt(12) if is_monthly else vol_period
+        if is_monthly:
+            mean_r    = _mean(rets)
+            rf_period = risk_free_rate / 12
+            sharpe    = (mean_r - rf_period) / vol_period * math.sqrt(12) if vol_period else 0.0
+        else:
+            mean_r = _mean(rets)
+            sharpe = (mean_r - risk_free_rate) / vol_period if vol_period else 0.0
+    else:
+        vol_annual = 0.0
+        sharpe     = 0.0
+
     d = {
         "monthly_contribution": monthly_c,
         "lump_sum":              lump_sum,
@@ -59,6 +76,8 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, l
         "profit":                round(profit,   2),
         "total_return_pct":      round(profit / invested * 100, 2) if invested else 0,
         "cagr_pct":              round(cagr,     2),
+        "volatility_pct":        round(vol_annual, 2),
+        "sharpe_ratio":          round(sharpe,     2),
         "bench_final":           round(bench,    2),
         "bench_profit":          round(bench - invested, 2),
         "bench_return_pct":      round((bench - invested) / invested * 100, 2) if invested else 0,
@@ -85,7 +104,8 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, l
 # ── strategies A + B  (annual data) ──────────────────────────────────────────
 
 def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
-                  user_end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0):
+                  user_end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0,
+                  risk_free_rate: float = 2.0):
     today = _date.today()
     if end_year is None:
         end_year = today.year - 1  # last fully completed year
@@ -212,15 +232,16 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
                           "profit_vs_cost": round(portB - invested, 2)})
 
     return {
-        "strategy_a": {"summary": _summarise(portA, benchA, invested, periA, monthly_c, lump_sum=lump_sum), "yearly": periA},
-        "strategy_b": {"summary": _summarise(portB, benchB, invested, periB, monthly_c, lump_sum=lump_sum), "yearly": periB},
+        "strategy_a": {"summary": _summarise(portA, benchA, invested, periA, monthly_c, lump_sum=lump_sum, risk_free_rate=risk_free_rate), "yearly": periA},
+        "strategy_b": {"summary": _summarise(portB, benchB, invested, periB, monthly_c, lump_sum=lump_sum, risk_free_rate=risk_free_rate), "yearly": periB},
     }
 
 
 # ── strategy C  (real monthly NAV data, 1m signal) ───────────────────────────
 
 def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None,
-                       lump_sum: bool = False, initial_capital: float = 0.0):
+                       lump_sum: bool = False, initial_capital: float = 0.0,
+                       risk_free_rate: float = 2.0):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -289,7 +310,7 @@ def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None
             } for f in top5],
         })
 
-    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum)
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum, risk_free_rate=risk_free_rate)
     s["date_range"] = f"{periods[0]['month']} → {periods[-1]['month']}" if periods else ""
     return {"summary": s, "monthly": periods}
 
@@ -297,7 +318,8 @@ def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None
 # ── strategies D + E  (N-month lookback momentum) ────────────────────────────
 
 def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = None,
-                                 end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0):
+                                 end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0,
+                                 risk_free_rate: float = 2.0):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -405,7 +427,7 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
     if not periods:
         return {"error": "Sin datos suficientes para el período seleccionado."}
 
-    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum)
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum, risk_free_rate=risk_free_rate)
     s["date_range"]      = f"{periods[0]['month']} → {periods[-1]['month']}"
     s["lookback_months"] = lookback
     return {"summary": s, "monthly": periods}
@@ -416,7 +438,8 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
 def run_all(monthly_contribution: float = 1_000.0,
             start_year: int = None, start_month: int = 1,
             end_year: int = None, end_month: int = None,
-            lump_sum: bool = False, initial_capital: float = 0.0) -> dict:
+            lump_sum: bool = False, initial_capital: float = 0.0,
+            risk_free_rate: float = 2.0) -> dict:
 
     if start_year is None:
         earliest = _q(
@@ -440,13 +463,17 @@ def run_all(monthly_contribution: float = 1_000.0,
 
     ab = _annual_both(monthly_contribution, start_year=start_year,
                        end_year=annual_end_year, user_end_ym=user_end_ym,
-                       lump_sum=lump_sum, initial_capital=initial_capital)
+                       lump_sum=lump_sum, initial_capital=initial_capital,
+                       risk_free_rate=risk_free_rate)
     c  = _monthly_compound(monthly_contribution, start_ym=start_ym, end_ym=user_end_ym,
-                            lump_sum=lump_sum, initial_capital=initial_capital)
+                            lump_sum=lump_sum, initial_capital=initial_capital,
+                            risk_free_rate=risk_free_rate)
     d  = _monthly_compound_lookback(monthly_contribution, 12, start_ym=start_ym, end_ym=user_end_ym,
-                                     lump_sum=lump_sum, initial_capital=initial_capital)
+                                     lump_sum=lump_sum, initial_capital=initial_capital,
+                                     risk_free_rate=risk_free_rate)
     e  = _monthly_compound_lookback(monthly_contribution,  6, start_ym=start_ym, end_ym=user_end_ym,
-                                     lump_sum=lump_sum, initial_capital=initial_capital)
+                                     lump_sum=lump_sum, initial_capital=initial_capital,
+                                     risk_free_rate=risk_free_rate)
 
     return {
         "strategy_a":      ab["strategy_a"],
@@ -462,6 +489,7 @@ def run_all(monthly_contribution: float = 1_000.0,
         "end_month":       end_month,
         "lump_sum":        lump_sum,
         "initial_capital": initial_capital,
+        "risk_free_rate":  risk_free_rate,
     }
 
 
