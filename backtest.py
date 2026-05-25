@@ -1,13 +1,19 @@
 """
-Unified momentum backtest — all 3 strategies in one optimized pass.
+Unified momentum backtest — 5 strategies in one optimized pass.
 
   A  Annual basic:    contributions earn ~half the year's return.
   B  Annual compound: sell all + contribution → invest total each year.
-  C  Monthly compound: same as B with real monthly Morningstar NAV data.
+  C  Monthly compound: real monthly NAV, 1m signal.
+  D  Monthly compound: real monthly NAV, 12m lookback.
+  E  Monthly compound: real monthly NAV, 6m lookback.
 
-Entry point: run_all(monthly_contribution) → {strategy_a, strategy_b, strategy_c, monthly}
+New parameters:
+  end_year / end_month  — optional simulation end date (default: today)
+  lump_sum              — one-time investment, no ongoing contributions
+  initial_capital       — initial amount for lump-sum mode
 """
 import os, sqlite3
+from datetime import date as _date
 from typing import Dict, List
 
 DB_PATH = os.environ.get(
@@ -27,7 +33,7 @@ def _q(sql: str, params: tuple = ()) -> List[Dict]:
         con.close()
 
 
-def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False):
+def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, lump_sum=False):
     profit  = port - invested
     n       = len(periods)
     annexp  = 12 / n if (is_monthly and n) else (1 / n if n else 1)
@@ -47,6 +53,7 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False):
 
     d = {
         "monthly_contribution": monthly_c,
+        "lump_sum":              lump_sum,
         "total_invested":        round(invested, 2),
         "final_value":           round(port,     2),
         "profit":                round(profit,   2),
@@ -77,13 +84,14 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False):
 
 # ── strategies A + B  (annual data) ──────────────────────────────────────────
 
-def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None):
-    from datetime import date as _date
+def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
+                  user_end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0):
+    today = _date.today()
     if end_year is None:
-        end_year = _date.today().year - 1  # last fully completed year
-    annual_c = monthly_c * 12
+        end_year = today.year - 1  # last fully completed year
 
-    # One bulk query — all years including signal year (start_year-1)
+    annual_c = 0.0 if lump_sum else monthly_c * 12
+
     rows = _q("""
         SELECT a.year, a.isin, a.return_pct,
                f.name, f.category_mediolanum AS cat, f.manager
@@ -96,7 +104,8 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None)
     for r in rows:
         by_year.setdefault(r["year"], []).append(r)
 
-    portA = portB = benchA = benchB = invested = 0.0
+    portA = portB = benchA = benchB = initial_capital if lump_sum else 0.0
+    invested = initial_capital if lump_sum else 0.0
     periA: List[Dict] = []
     periB: List[Dict] = []
 
@@ -113,14 +122,18 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None)
         sr = sum(actual) / len(actual)
         br = sum(r["return_pct"] for r in by_year[yr]) / len(by_year[yr])
 
-        # A: existing capital earns full return; new contributions earn ~half
-        portA  = portA  * (1 + sr / 100) + annual_c * (1 + sr / 200)
-        benchA = benchA * (1 + br / 100) + annual_c * (1 + br / 200)
-        # B: sell everything + contribution → invest all at full return
-        portB  = (portB  + annual_c) * (1 + sr / 100)
-        benchB = (benchB + annual_c) * (1 + br / 100)
+        if lump_sum:
+            portA  = portA  * (1 + sr / 100)
+            benchA = benchA * (1 + br / 100)
+            portB  = portB  * (1 + sr / 100)
+            benchB = benchB * (1 + br / 100)
+        else:
+            portA  = portA  * (1 + sr / 100) + annual_c * (1 + sr / 200)
+            benchA = benchA * (1 + br / 100) + annual_c * (1 + br / 200)
+            portB  = (portB  + annual_c) * (1 + sr / 100)
+            benchB = (benchB + annual_c) * (1 + br / 100)
+            invested += annual_c
 
-        invested += annual_c
         funds_det = [{
             "isin": f["isin"], "name": f["name"], "category": f["cat"],
             "signal_return": round(f["return_pct"], 2),
@@ -142,68 +155,72 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None)
                       "bench_value": round(benchB, 2),
                       "profit_vs_cost": round(portB - invested, 2)})
 
-    # Partial current year — signal = end_year top-5, return = latest period_returns
-    latest_ym_row = _q(
-        "SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL"
-    )
-    latest_ym = latest_ym_row[0]["m"] if latest_ym_row and latest_ym_row[0]["m"] else None
+    # Partial current year — only when no explicit end date was given
+    if user_end_ym is None:
+        latest_ym_row = _q(
+            "SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL"
+        )
+        latest_ym = latest_ym_row[0]["m"] if latest_ym_row and latest_ym_row[0]["m"] else None
 
-    top5_signal = _q("""
-        SELECT a.isin, a.return_pct AS sig_ret,
-               f.name, f.category_mediolanum AS cat, p.return_1m
-        FROM annual_returns a JOIN funds f USING (isin)
-        LEFT JOIN period_returns p USING (isin)
-        WHERE a.year = ? AND a.return_pct IS NOT NULL
-        ORDER BY a.return_pct DESC LIMIT 5
-    """, (end_year,))
-    cur_1m = [r["return_1m"] for r in top5_signal if r["return_1m"] is not None]
-    b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
-    b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
+        top5_signal = _q("""
+            SELECT a.isin, a.return_pct AS sig_ret,
+                   f.name, f.category_mediolanum AS cat, p.return_1m
+            FROM annual_returns a JOIN funds f USING (isin)
+            LEFT JOIN period_returns p USING (isin)
+            WHERE a.year = ? AND a.return_pct IS NOT NULL
+            ORDER BY a.return_pct DESC LIMIT 5
+        """, (end_year,))
+        cur_1m = [r["return_1m"] for r in top5_signal if r["return_1m"] is not None]
+        b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
+        b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
 
-    if cur_1m and latest_ym:
-        r1m = sum(cur_1m) / len(cur_1m)
-        portA  *= (1 + r1m / 100);  benchA  *= (1 + b1m / 100)
-        portB   = (portB  + monthly_c) * (1 + r1m / 100)
-        benchB  = (benchB + monthly_c) * (1 + b1m / 100)
-        invested += monthly_c
+        if cur_1m and latest_ym:
+            r1m = sum(cur_1m) / len(cur_1m)
+            portA  *= (1 + r1m / 100);  benchA *= (1 + b1m / 100)
+            if lump_sum:
+                portB  *= (1 + r1m / 100)
+                benchB *= (1 + b1m / 100)
+            else:
+                portB   = (portB  + monthly_c) * (1 + r1m / 100)
+                benchB  = (benchB + monthly_c) * (1 + b1m / 100)
+                invested += monthly_c
 
-        # Human-readable label: "2026 (May)"
-        MONTHS_SHORT = {
-            "01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
-            "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic",
-        }
-        ym_parts = latest_ym.split("-")
-        partial_label = f"{ym_parts[0]} ({MONTHS_SHORT.get(ym_parts[1], ym_parts[1])})"
+            MONTHS_SHORT = {
+                "01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
+                "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic",
+            }
+            ym_parts = latest_ym.split("-")
+            partial_label = f"{ym_parts[0]} ({MONTHS_SHORT.get(ym_parts[1], ym_parts[1])})"
 
-        partial_funds = [{
-            "isin": r["isin"], "name": r["name"], "category": r["cat"],
-            "signal_return": round(r["sig_ret"], 2),
-            "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
-        } for r in top5_signal]
+            partial_funds = [{
+                "isin": r["isin"], "name": r["name"], "category": r["cat"],
+                "signal_return": round(r["sig_ret"], 2),
+                "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
+            } for r in top5_signal]
 
-        pbase = {
-            "year": partial_label, "period": partial_label, "ret": r1m,
-            "strategy_return": round(r1m, 2), "benchmark_return": round(b1m, 2),
-            "total_invested": round(invested, 2), "n_funds": len(cur_1m),
-            "funds_selected": partial_funds,
-        }
-        periA.append({**pbase, "portfolio_value": round(portA, 2),
-                      "bench_value": round(benchA, 2),
-                      "profit_vs_cost": round(portA - invested, 2)})
-        periB.append({**pbase, "portfolio_value": round(portB, 2),
-                      "bench_value": round(benchB, 2),
-                      "profit_vs_cost": round(portB - invested, 2)})
+            pbase = {
+                "year": partial_label, "period": partial_label, "ret": r1m,
+                "strategy_return": round(r1m, 2), "benchmark_return": round(b1m, 2),
+                "total_invested": round(invested, 2), "n_funds": len(cur_1m),
+                "funds_selected": partial_funds,
+            }
+            periA.append({**pbase, "portfolio_value": round(portA, 2),
+                          "bench_value": round(benchA, 2),
+                          "profit_vs_cost": round(portA - invested, 2)})
+            periB.append({**pbase, "portfolio_value": round(portB, 2),
+                          "bench_value": round(benchB, 2),
+                          "profit_vs_cost": round(portB - invested, 2)})
 
     return {
-        "strategy_a": {"summary": _summarise(portA, benchA, invested, periA, monthly_c), "yearly": periA},
-        "strategy_b": {"summary": _summarise(portB, benchB, invested, periB, monthly_c), "yearly": periB},
+        "strategy_a": {"summary": _summarise(portA, benchA, invested, periA, monthly_c, lump_sum=lump_sum), "yearly": periA},
+        "strategy_b": {"summary": _summarise(portB, benchB, invested, periB, monthly_c, lump_sum=lump_sum), "yearly": periB},
     }
 
 
-# ── strategy C  (real monthly NAV data) ──────────────────────────────────────
+# ── strategy C  (real monthly NAV data, 1m signal) ───────────────────────────
 
-def _monthly_compound(monthly_c: float, start_ym: str = None):
-    # ONE bulk query instead of ~860 individual queries
+def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None,
+                       lump_sum: bool = False, initial_capital: float = 0.0):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -221,14 +238,16 @@ def _monthly_compound(monthly_c: float, start_ym: str = None):
 
     months = sorted(by_month)
 
-    # Apply start filter — keep start_ym as the first *signal* month
     if start_ym:
         months = [m for m in months if m >= start_ym]
+    if end_ym:
+        months = [m for m in months if m <= end_ym]
 
     if len(months) < 3:
-        return {"error": "Datos insuficientes para el período seleccionado. Elige una fecha de inicio anterior."}
+        return {"error": "Datos insuficientes para el período seleccionado. Elige una fecha de inicio anterior o un período más amplio."}
 
-    port = bench = invested = 0.0
+    port = bench = initial_capital if lump_sum else 0.0
+    invested = initial_capital if lump_sum else 0.0
     periods: List[Dict] = []
 
     for i in range(1, len(months)):
@@ -246,9 +265,13 @@ def _monthly_compound(monthly_c: float, start_ym: str = None):
         sr = sum(actual)     / len(actual)
         br = sum(bench_all)  / len(bench_all)
 
-        port  = (port  + monthly_c) * (1 + sr / 100)
-        bench = (bench + monthly_c) * (1 + br / 100)
-        invested += monthly_c
+        if lump_sum:
+            port  = port  * (1 + sr / 100)
+            bench = bench * (1 + br / 100)
+        else:
+            port  = (port  + monthly_c) * (1 + sr / 100)
+            bench = (bench + monthly_c) * (1 + br / 100)
+            invested += monthly_c
 
         periods.append({
             "month": cur, "signal_month": sig, "period": cur, "ret": sr,
@@ -266,20 +289,15 @@ def _monthly_compound(monthly_c: float, start_ym: str = None):
             } for f in top5],
         })
 
-    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True)
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum)
     s["date_range"] = f"{periods[0]['month']} → {periods[-1]['month']}" if periods else ""
     return {"summary": s, "monthly": periods}
 
 
 # ── strategies D + E  (N-month lookback momentum) ────────────────────────────
 
-def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = None):
-    """
-    Select top-5 funds each month by their compound return over the last
-    `lookback` months (e.g. 12 for Strategy D, 6 for Strategy E).
-    Uses ALL historical data for signal calculation; portfolio accumulation
-    begins from start_ym (or from the first month that has enough history).
-    """
+def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = None,
+                                 end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -291,9 +309,8 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
     if not rows:
         return {"error": "Sin datos mensuales."}
 
-    # Build lookup structures once
     by_month: Dict[str, List[Dict]] = {}
-    fund_ret: Dict[str, Dict[str, float]] = {}  # isin → {year_month: return_pct}
+    fund_ret: Dict[str, Dict[str, float]] = {}
     fund_meta: Dict[str, Dict] = {}
 
     for r in rows:
@@ -304,7 +321,7 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
 
     months = sorted(by_month)
 
-    # First investment index: need `lookback` months of signal history
+    # invest_start: need `lookback` months of signal history + respect start_ym
     invest_start = lookback
     if start_ym:
         for i, m in enumerate(months):
@@ -312,17 +329,25 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
                 invest_start = max(invest_start, i)
                 break
 
-    if invest_start >= len(months):
+    # invest_end: stop before any month > end_ym
+    invest_end = len(months)
+    if end_ym:
+        for i, m in enumerate(months):
+            if m > end_ym:
+                invest_end = i
+                break
+
+    if invest_start >= invest_end:
         return {"error": "Datos insuficientes para el período seleccionado."}
 
-    port = bench = invested = 0.0
+    port = bench = initial_capital if lump_sum else 0.0
+    invested = initial_capital if lump_sum else 0.0
     periods: List[Dict] = []
 
-    for i in range(invest_start, len(months)):
+    for i in range(invest_start, invest_end):
         cur = months[i]
-        sig_window = months[i - lookback: i]  # lookback months used as signal
+        sig_window = months[i - lookback: i]
 
-        # Compute compound return over signal window for every fund
         scores: Dict[str, float] = {}
         for isin, month_rets in fund_ret.items():
             rets = [month_rets[m] for m in sig_window if m in month_rets]
@@ -348,9 +373,13 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
         sr = sum(actual)    / len(actual)
         br = sum(bench_all) / len(bench_all)
 
-        port  = (port  + monthly_c) * (1 + sr / 100)
-        bench = (bench + monthly_c) * (1 + br / 100)
-        invested += monthly_c
+        if lump_sum:
+            port  = port  * (1 + sr / 100)
+            bench = bench * (1 + br / 100)
+        else:
+            port  = (port  + monthly_c) * (1 + sr / 100)
+            bench = (bench + monthly_c) * (1 + br / 100)
+            invested += monthly_c
 
         periods.append({
             "month":            cur,
@@ -376,7 +405,7 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
     if not periods:
         return {"error": "Sin datos suficientes para el período seleccionado."}
 
-    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True)
+    s = _summarise(port, bench, invested, periods, monthly_c, is_monthly=True, lump_sum=lump_sum)
     s["date_range"]      = f"{periods[0]['month']} → {periods[-1]['month']}"
     s["lookback_months"] = lookback
     return {"summary": s, "monthly": periods}
@@ -385,11 +414,10 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
 # ── public entry ──────────────────────────────────────────────────────────────
 
 def run_all(monthly_contribution: float = 1_000.0,
-            start_year: int = None,
-            start_month: int = 1) -> dict:
-    from datetime import date as _date
+            start_year: int = None, start_month: int = 1,
+            end_year: int = None, end_month: int = None,
+            lump_sum: bool = False, initial_capital: float = 0.0) -> dict:
 
-    # Default: earliest year with annual data (≈ 2016)
     if start_year is None:
         earliest = _q(
             "SELECT MIN(year) AS y FROM annual_returns WHERE return_pct IS NOT NULL"
@@ -399,27 +427,47 @@ def run_all(monthly_contribution: float = 1_000.0,
     start_month = max(1, min(12, int(start_month)))
     start_ym = f"{start_year}-{start_month:02d}"
 
-    ab = _annual_both(monthly_contribution, start_year=start_year)
-    c  = _monthly_compound(monthly_contribution, start_ym=start_ym)
-    d  = _monthly_compound_lookback(monthly_contribution, 12, start_ym=start_ym)
-    e  = _monthly_compound_lookback(monthly_contribution,  6, start_ym=start_ym)
+    # Determine effective end date: only apply if it's strictly before today
+    today = _date.today()
+    current_ym = f"{today.year}-{today.month:02d}"
+    user_end_ym = None
+    annual_end_year = None
+    if end_year is not None and end_month is not None:
+        candidate = f"{end_year}-{end_month:02d}"
+        if candidate < current_ym:
+            user_end_ym     = candidate
+            annual_end_year = end_year
+
+    ab = _annual_both(monthly_contribution, start_year=start_year,
+                       end_year=annual_end_year, user_end_ym=user_end_ym,
+                       lump_sum=lump_sum, initial_capital=initial_capital)
+    c  = _monthly_compound(monthly_contribution, start_ym=start_ym, end_ym=user_end_ym,
+                            lump_sum=lump_sum, initial_capital=initial_capital)
+    d  = _monthly_compound_lookback(monthly_contribution, 12, start_ym=start_ym, end_ym=user_end_ym,
+                                     lump_sum=lump_sum, initial_capital=initial_capital)
+    e  = _monthly_compound_lookback(monthly_contribution,  6, start_ym=start_ym, end_ym=user_end_ym,
+                                     lump_sum=lump_sum, initial_capital=initial_capital)
 
     return {
-        "strategy_a":  ab["strategy_a"],
-        "strategy_b":  ab["strategy_b"],
-        "strategy_c":  c,
-        "strategy_d":  d,
-        "strategy_e":  e,
-        "monthly":     monthly_contribution,
-        "start_year":  start_year,
-        "start_month": start_month,
-        "start_ym":    start_ym,
+        "strategy_a":      ab["strategy_a"],
+        "strategy_b":      ab["strategy_b"],
+        "strategy_c":      c,
+        "strategy_d":      d,
+        "strategy_e":      e,
+        "monthly":         monthly_contribution,
+        "start_year":      start_year,
+        "start_month":     start_month,
+        "start_ym":        start_ym,
+        "end_year":        end_year,
+        "end_month":       end_month,
+        "lump_sum":        lump_sum,
+        "initial_capital": initial_capital,
     }
 
 
 if __name__ == "__main__":
     r = run_all(1_000)
-    for k in ("strategy_a", "strategy_b", "strategy_c"):
+    for k in ("strategy_a", "strategy_b", "strategy_c", "strategy_d", "strategy_e"):
         s = r[k].get("summary", r[k])
         val = s.get("final_value", 0)
         ret = s.get("total_return_pct", 0)

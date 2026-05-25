@@ -168,6 +168,10 @@
     }
     select{min-width:130px}input[type="number"]{width:148px}
     select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(22,163,74,.1)}
+    .mode-btn{padding:7px 13px;font-size:.8rem;font-family:inherit;border:1.5px solid var(--brd);background:var(--bg);color:var(--txt);cursor:pointer;transition:var(--tr)}
+    .mode-btn:first-child{border-radius:6px 0 0 6px;border-right:none}
+    .mode-btn:last-child{border-radius:0 6px 6px 0}
+    .mode-btn.mode-active{background:var(--accent);color:#fff;border-color:var(--accent)}
 
     /* ── Info toggle inside hcard ─────────────────────────── */
     .info-btn{
@@ -473,9 +477,23 @@
         <div class="box">
           <h3><i class="fa-solid fa-sliders" style="color:var(--accent)"></i> Configurar simulación</h3>
           <div class="srow">
-            <div class="sgrp"><label>Aportación mensual (€)</label><input type="number" id="inputM" value="1000" min="100" step="100"/></div>
             <div class="sgrp">
-              <label>Inicio de inversión</label>
+              <label>Tipo de inversión</label>
+              <div style="display:flex">
+                <button id="btnModeMonthly" class="mode-btn mode-active" onclick="setMode('monthly')">Aportaciones mensuales</button>
+                <button id="btnModeLump"    class="mode-btn"             onclick="setMode('lump')">Capital único</button>
+              </div>
+            </div>
+            <div class="sgrp" id="grpMonthly">
+              <label>Aportación mensual (€)</label>
+              <input type="number" id="inputM" value="1000" min="100" step="100"/>
+            </div>
+            <div class="sgrp" id="grpLump" style="display:none">
+              <label>Capital inicial (€)</label>
+              <input type="number" id="inputLump" value="100000" min="1000" step="1000"/>
+            </div>
+            <div class="sgrp">
+              <label>Inicio</label>
               <div style="display:flex;gap:8px">
                 <select id="selStartMonth" style="min-width:110px">
                   <option value="1">Enero</option><option value="2">Febrero</option>
@@ -486,6 +504,20 @@
                   <option value="11">Noviembre</option><option value="12">Diciembre</option>
                 </select>
                 <select id="selStartYear" style="min-width:90px"></select>
+              </div>
+            </div>
+            <div class="sgrp">
+              <label>Fin</label>
+              <div style="display:flex;gap:8px">
+                <select id="selEndMonth" style="min-width:110px">
+                  <option value="1">Enero</option><option value="2">Febrero</option>
+                  <option value="3">Marzo</option><option value="4">Abril</option>
+                  <option value="5">Mayo</option><option value="6">Junio</option>
+                  <option value="7">Julio</option><option value="8">Agosto</option>
+                  <option value="9">Septiembre</option><option value="10">Octubre</option>
+                  <option value="11">Noviembre</option><option value="12">Diciembre</option>
+                </select>
+                <select id="selEndYear" style="min-width:90px"></select>
               </div>
             </div>
             <button class="btn green" id="btnSim" onclick="runSim()"><i class="fa-solid fa-play"></i> Calcular</button>
@@ -768,6 +800,7 @@ async function populateYears(){
   const selSY = document.getElementById('selStartYear');
   selSY.innerHTML = '';
   const curY = new Date().getFullYear();
+  const curM = new Date().getMonth() + 1;
   const simYears = [...years].reverse().filter(y => y < curY);
   simYears.forEach(y=>{
     const o = document.createElement('option');
@@ -781,6 +814,20 @@ async function populateYears(){
   // Default: 2016 (start of monthly NAV data, ~10yr history)
   const defaultSY = simYears.find(y => y === 2016) || simYears[0];
   if(defaultSY) selSY.value = defaultSY;
+
+  // Simulation end-year selector (all years up to current year)
+  const selEY = document.getElementById('selEndYear');
+  selEY.innerHTML = '';
+  const endYears = [...years].reverse();
+  endYears.forEach(y=>{
+    const o = document.createElement('option');
+    o.value = y;
+    o.textContent = y === curY ? `${y} (hoy)` : String(y);
+    selEY.appendChild(o);
+  });
+  selEY.value = curY;
+  // Default end month = current month
+  document.getElementById('selEndMonth').value = curM;
 }
 
 async function searchYear(){
@@ -804,21 +851,42 @@ async function searchYear(){
 
 // ── Simulation ────────────────────────────────────────────────
 let _charts = {};
+let _simMode = 'monthly';
 
 const MONTHS_ES = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
+function setMode(mode){
+  _simMode = mode;
+  document.getElementById('btnModeMonthly').classList.toggle('mode-active', mode==='monthly');
+  document.getElementById('btnModeLump').classList.toggle('mode-active', mode==='lump');
+  document.getElementById('grpMonthly').style.display = mode==='monthly' ? '' : 'none';
+  document.getElementById('grpLump').style.display    = mode==='lump'    ? '' : 'none';
+}
+
 async function runSim(){
   window._simLoaded = true;
-  const m          = parseFloat(document.getElementById('inputM').value)||1000;
+  const isLump     = _simMode === 'lump';
+  const m          = isLump ? 0 : (parseFloat(document.getElementById('inputM').value)||1000);
+  const lumpCap    = isLump ? (parseFloat(document.getElementById('inputLump').value)||100000) : 0;
   const startYear  = parseInt(document.getElementById('selStartYear')?.value  || 0) || null;
   const startMonth = parseInt(document.getElementById('selStartMonth')?.value || 1);
+  const endYear    = parseInt(document.getElementById('selEndYear')?.value    || 0) || null;
+  const endMonth   = parseInt(document.getElementById('selEndMonth')?.value   || 1);
   const btn = document.getElementById('btnSim');
   const div = document.getElementById('div-sim');
   btn.disabled=true;
   btn.innerHTML='<div class="spin" style="width:15px;height:15px;border-width:2px"></div> Calculando…';
-  div.innerHTML=`<div class="loading"><div class="spin"></div><p>Simulando estrategias desde ${MONTHS_ES[startMonth]} ${startYear||''}…</p></div>`;
+  div.innerHTML=`<div class="loading"><div class="spin"></div><p>Simulando estrategias…</p></div>`;
   try{
-    const url = `/api/backtest-all?monthly=${m}${startYear?`&start_year=${startYear}`:''}${startMonth!==1?`&start_month=${startMonth}`:''}`;
+    let url = '/api/backtest-all?';
+    if(isLump){
+      url += `mode=lump_sum&initial_capital=${lumpCap}&monthly=0`;
+    } else {
+      url += `monthly=${m}`;
+    }
+    if(startYear)         url += `&start_year=${startYear}`;
+    if(startMonth !== 1)  url += `&start_month=${startMonth}`;
+    if(endYear)           url += `&end_year=${endYear}&end_month=${endMonth}`;
     const d = await fetch(url).then(r=>r.json());
     if(d.error) throw new Error(d.error);
     // Show period info bar
@@ -827,7 +895,9 @@ async function runSim(){
     if(info && txt && d.start_year){
       const c = d.strategy_c?.summary;
       const range = c?.date_range || '';
-      txt.textContent = `Período simulado: ${MONTHS_ES[d.start_month]} ${d.start_year} → hoy${range?' ('+range+')':''}`;
+      const endLabel = (d.end_year && d.end_month) ? `${MONTHS_ES[d.end_month]} ${d.end_year}` : 'hoy';
+      const modeLabel = d.lump_sum ? ` · Capital único ${fe2(d.initial_capital)}` : '';
+      txt.textContent = `Período: ${MONTHS_ES[d.start_month]} ${d.start_year} → ${endLabel}${modeLabel}${range?' ('+range+')':''}`;
       info.style.display = 'block';
     }
     div.innerHTML = buildSim(d);
@@ -851,8 +921,10 @@ function buildSim(d){
   const winE = E && !winC && !winB && !winD && E.final_value===maxVal;
 
   // Period badge for header cards
+  const endLabel  = (d.end_year && d.end_month) ? `${MONTHS_ES[d.end_month]} ${d.end_year}` : 'hoy';
+  const modeStr   = d.lump_sum ? `Capital único ${fe2(d.initial_capital)}` : `${fe2(d.monthly)}/mes`;
   const periodStr = d.start_year
-    ? `Desde ${MONTHS_ES[d.start_month||1]} ${d.start_year}`
+    ? `${MONTHS_ES[d.start_month||1]} ${d.start_year} → ${endLabel} · ${modeStr}`
     : '';
 
   // Explanations for each strategy

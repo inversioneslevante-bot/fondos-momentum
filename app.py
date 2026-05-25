@@ -144,16 +144,26 @@ def api_dashboard_chart():
 @app.route("/api/backtest-all")
 def api_backtest_all():
     try:
-        monthly      = float(request.args.get("monthly", 1000))
-        start_year   = int(request.args.get("start_year",  0)) or None
-        start_month  = int(request.args.get("start_month", 1))
+        monthly       = float(request.args.get("monthly", 1000))
+        start_year    = int(request.args.get("start_year",  0)) or None
+        start_month   = int(request.args.get("start_month", 1))
+        end_year      = int(request.args.get("end_year",   0)) or None
+        end_month     = int(request.args.get("end_month",  0)) or None
+        mode          = request.args.get("mode", "monthly")
+        initial_cap   = float(request.args.get("initial_capital", 0))
     except (ValueError, TypeError):
         monthly, start_year, start_month = 1000.0, None, 1
+        end_year, end_month, mode, initial_cap = None, None, "monthly", 0.0
+    lump_sum = (mode == "lump_sum")
     from backtest import run_all
     return jsonify(run_all(
-        monthly_contribution=monthly,
+        monthly_contribution=0.0 if lump_sum else monthly,
         start_year=start_year,
         start_month=start_month,
+        end_year=end_year,
+        end_month=end_month,
+        lump_sum=lump_sum,
+        initial_capital=initial_cap if lump_sum else 0.0,
     ))
 
 
