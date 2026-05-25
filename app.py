@@ -39,6 +39,21 @@ def _startup_sync():
         logger.error(f"Startup sync error: {e}")
 
 
+def _startup_benchmarks():
+    """Download S&P 500 and other benchmark data if missing or stale."""
+    import threading
+    def _run():
+        try:
+            from fetch_benchmark import fetch_all, needs_update
+            if needs_update("^GSPC"):
+                logger.info("Startup: fetching benchmark data…")
+                n = fetch_all()
+                logger.info(f"Startup: stored {n} benchmark rows.")
+        except Exception as e:
+            logger.error(f"Startup benchmark fetch error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 # ── APScheduler: daily auto-update ───────────────────────────────────────────
 
 def _scheduled_job():
@@ -149,12 +164,14 @@ def api_backtest_all():
         start_month   = int(request.args.get("start_month", 1))
         end_year        = int(request.args.get("end_year",        0))   or None
         end_month       = int(request.args.get("end_month",       0))   or None
-        mode            = request.args.get("mode", "monthly")
-        initial_cap     = float(request.args.get("initial_capital", 0))
-        risk_free_rate  = float(request.args.get("risk_free_rate",  2.0))
+        mode              = request.args.get("mode", "monthly")
+        initial_cap       = float(request.args.get("initial_capital", 0))
+        risk_free_rate    = float(request.args.get("risk_free_rate",  2.0))
+        benchmark_ticker  = request.args.get("benchmark", "avg")
     except (ValueError, TypeError):
         monthly, start_year, start_month = 1000.0, None, 1
         end_year, end_month, mode, initial_cap, risk_free_rate = None, None, "monthly", 0.0, 2.0
+        benchmark_ticker = "avg"
     lump_sum = (mode == "lump_sum")
     from backtest import run_all
     return jsonify(run_all(
@@ -166,6 +183,7 @@ def api_backtest_all():
         lump_sum=lump_sum,
         initial_capital=initial_cap if lump_sum else 0.0,
         risk_free_rate=risk_free_rate,
+        benchmark_ticker=benchmark_ticker,
     ))
 
 
@@ -191,6 +209,34 @@ def api_nav_status():
                         "pct": round(with_nav / total * 100, 1) if total else 0})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fetch-benchmark", methods=["POST"])
+def api_fetch_benchmark():
+    import threading
+    def _run():
+        from fetch_benchmark import fetch_all
+        n = fetch_all()
+        logger.info(f"Background benchmark fetch complete: {n} rows.")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/benchmark-status")
+def api_benchmark_status():
+    try:
+        import sqlite3 as sq
+        db = os.environ.get("FONDOS_DB_PATH",
+             os.path.join(os.path.dirname(__file__), "data", "cache.db"))
+        con = sq.connect(db)
+        rows = con.execute("""
+            SELECT ticker, COUNT(*) as n, MAX(year_month) as latest
+            FROM benchmark_returns GROUP BY ticker
+        """).fetchall()
+        con.close()
+        return jsonify({"benchmarks": [{"ticker": r[0], "months": r[1], "latest": r[2]} for r in rows]})
+    except Exception as e:
+        return jsonify({"benchmarks": [], "error": str(e)})
 
 
 @app.route("/api/fetch-nav", methods=["POST"])
@@ -243,6 +289,7 @@ if __name__ == "__main__":
             do_import(csv_path)
 
     _startup_sync()
+    _startup_benchmarks()
     _start_scheduler()
 
     app.run(debug=False, host="0.0.0.0", port=5050, use_reloader=False)

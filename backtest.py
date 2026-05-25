@@ -101,11 +101,40 @@ def _summarise(port, bench, invested, periods, monthly_c, *, is_monthly=False, l
     return d
 
 
+# ── benchmark helpers ─────────────────────────────────────────────────────────
+
+def _bench_monthly(ticker: str) -> dict:
+    """Return {year_month: return_pct} for an external benchmark ticker."""
+    if not ticker or ticker == "avg":
+        return {}
+    rows = _q(
+        "SELECT year_month, return_pct FROM benchmark_returns WHERE ticker=? AND return_pct IS NOT NULL",
+        (ticker,),
+    )
+    return {r["year_month"]: r["return_pct"] for r in rows}
+
+
+def _bench_annual(ticker: str) -> dict:
+    """Return {year: annual_compound_return_pct} computed from monthly data."""
+    monthly = _bench_monthly(ticker)
+    by_year: Dict[int, list] = {}
+    for ym, ret in monthly.items():
+        by_year.setdefault(int(ym[:4]), []).append(ret)
+    result = {}
+    for yr, rets in by_year.items():
+        if len(rets) >= 10:  # need at least 10 months for a credible annual figure
+            v = 1.0
+            for r in rets:
+                v *= 1 + r / 100
+            result[yr] = (v - 1) * 100
+    return result
+
+
 # ── strategies A + B  (annual data) ──────────────────────────────────────────
 
 def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
                   user_end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0,
-                  risk_free_rate: float = 2.0):
+                  risk_free_rate: float = 2.0, benchmark_ticker: str = "avg"):
     today = _date.today()
     if end_year is None:
         end_year = today.year - 1  # last fully completed year
@@ -129,6 +158,8 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
     periA: List[Dict] = []
     periB: List[Dict] = []
 
+    annual_bench = _bench_annual(benchmark_ticker)  # {} if ticker == "avg"
+
     for yr in range(start_year, end_year + 1):
         if yr - 1 not in by_year or yr not in by_year:
             continue
@@ -140,7 +171,8 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
             continue
 
         sr = sum(actual) / len(actual)
-        br = sum(r["return_pct"] for r in by_year[yr]) / len(by_year[yr])
+        avg_br = sum(r["return_pct"] for r in by_year[yr]) / len(by_year[yr])
+        br = annual_bench.get(yr, avg_br)
 
         if lump_sum:
             portA  = portA  * (1 + sr / 100)
@@ -191,8 +223,13 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
             ORDER BY a.return_pct DESC LIMIT 5
         """, (end_year,))
         cur_1m = [r["return_1m"] for r in top5_signal if r["return_1m"] is not None]
-        b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
-        b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
+        # Benchmark for partial year: use external ticker if available, else avg of all funds
+        ext_b1m = _bench_monthly(benchmark_ticker).get(latest_ym) if latest_ym else None
+        if ext_b1m is not None:
+            b1m = ext_b1m
+        else:
+            b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
+            b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
 
         if cur_1m and latest_ym:
             r1m = sum(cur_1m) / len(cur_1m)
@@ -241,7 +278,7 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
 
 def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None,
                        lump_sum: bool = False, initial_capital: float = 0.0,
-                       risk_free_rate: float = 2.0):
+                       risk_free_rate: float = 2.0, benchmark_ticker: str = "avg"):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -267,6 +304,7 @@ def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None
     if len(months) < 3:
         return {"error": "Datos insuficientes para el período seleccionado. Elige una fecha de inicio anterior o un período más amplio."}
 
+    ext_bench = _bench_monthly(benchmark_ticker)
     port = bench = initial_capital if lump_sum else 0.0
     invested = initial_capital if lump_sum else 0.0
     periods: List[Dict] = []
@@ -283,8 +321,8 @@ def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None
         if not actual:
             continue
 
-        sr = sum(actual)     / len(actual)
-        br = sum(bench_all)  / len(bench_all)
+        sr = sum(actual) / len(actual)
+        br = ext_bench.get(cur, sum(bench_all) / len(bench_all)) if bench_all else 0.0
 
         if lump_sum:
             port  = port  * (1 + sr / 100)
@@ -319,7 +357,7 @@ def _monthly_compound(monthly_c: float, start_ym: str = None, end_ym: str = None
 
 def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = None,
                                  end_ym: str = None, lump_sum: bool = False, initial_capital: float = 0.0,
-                                 risk_free_rate: float = 2.0):
+                                 risk_free_rate: float = 2.0, benchmark_ticker: str = "avg"):
     rows = _q("""
         SELECT m.isin, m.year_month, m.return_pct,
                f.name, f.category_mediolanum AS cat
@@ -362,6 +400,7 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
     if invest_start >= invest_end:
         return {"error": "Datos insuficientes para el período seleccionado."}
 
+    ext_bench = _bench_monthly(benchmark_ticker)
     port = bench = initial_capital if lump_sum else 0.0
     invested = initial_capital if lump_sum else 0.0
     periods: List[Dict] = []
@@ -392,8 +431,8 @@ def _monthly_compound_lookback(monthly_c: float, lookback: int, start_ym: str = 
         if not actual:
             continue
 
-        sr = sum(actual)    / len(actual)
-        br = sum(bench_all) / len(bench_all)
+        sr = sum(actual) / len(actual)
+        br = ext_bench.get(cur, sum(bench_all) / len(bench_all)) if bench_all else 0.0
 
         if lump_sum:
             port  = port  * (1 + sr / 100)
@@ -439,7 +478,7 @@ def run_all(monthly_contribution: float = 1_000.0,
             start_year: int = None, start_month: int = 1,
             end_year: int = None, end_month: int = None,
             lump_sum: bool = False, initial_capital: float = 0.0,
-            risk_free_rate: float = 2.0) -> dict:
+            risk_free_rate: float = 2.0, benchmark_ticker: str = "avg") -> dict:
 
     if start_year is None:
         earliest = _q(
@@ -464,32 +503,33 @@ def run_all(monthly_contribution: float = 1_000.0,
     ab = _annual_both(monthly_contribution, start_year=start_year,
                        end_year=annual_end_year, user_end_ym=user_end_ym,
                        lump_sum=lump_sum, initial_capital=initial_capital,
-                       risk_free_rate=risk_free_rate)
+                       risk_free_rate=risk_free_rate, benchmark_ticker=benchmark_ticker)
     c  = _monthly_compound(monthly_contribution, start_ym=start_ym, end_ym=user_end_ym,
                             lump_sum=lump_sum, initial_capital=initial_capital,
-                            risk_free_rate=risk_free_rate)
+                            risk_free_rate=risk_free_rate, benchmark_ticker=benchmark_ticker)
     d  = _monthly_compound_lookback(monthly_contribution, 12, start_ym=start_ym, end_ym=user_end_ym,
                                      lump_sum=lump_sum, initial_capital=initial_capital,
-                                     risk_free_rate=risk_free_rate)
+                                     risk_free_rate=risk_free_rate, benchmark_ticker=benchmark_ticker)
     e  = _monthly_compound_lookback(monthly_contribution,  6, start_ym=start_ym, end_ym=user_end_ym,
                                      lump_sum=lump_sum, initial_capital=initial_capital,
-                                     risk_free_rate=risk_free_rate)
+                                     risk_free_rate=risk_free_rate, benchmark_ticker=benchmark_ticker)
 
     return {
-        "strategy_a":      ab["strategy_a"],
-        "strategy_b":      ab["strategy_b"],
-        "strategy_c":      c,
-        "strategy_d":      d,
-        "strategy_e":      e,
-        "monthly":         monthly_contribution,
-        "start_year":      start_year,
-        "start_month":     start_month,
-        "start_ym":        start_ym,
-        "end_year":        end_year,
-        "end_month":       end_month,
-        "lump_sum":        lump_sum,
-        "initial_capital": initial_capital,
-        "risk_free_rate":  risk_free_rate,
+        "strategy_a":        ab["strategy_a"],
+        "strategy_b":        ab["strategy_b"],
+        "strategy_c":        c,
+        "strategy_d":        d,
+        "strategy_e":        e,
+        "monthly":           monthly_contribution,
+        "start_year":        start_year,
+        "start_month":       start_month,
+        "start_ym":          start_ym,
+        "end_year":          end_year,
+        "end_month":         end_month,
+        "lump_sum":          lump_sum,
+        "initial_capital":   initial_capital,
+        "risk_free_rate":    risk_free_rate,
+        "benchmark_ticker":  benchmark_ticker,
     }
 
 

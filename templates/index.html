@@ -521,6 +521,14 @@
               </div>
             </div>
             <div class="sgrp">
+              <label>Benchmark</label>
+              <select id="selBenchmark" style="min-width:150px">
+                <option value="avg">Media fondos (universo)</option>
+                <option value="^GSPC" selected>S&amp;P 500</option>
+                <option value="^STOXX50E">Euro Stoxx 50</option>
+              </select>
+            </div>
+            <div class="sgrp">
               <label>Tasa libre de riesgo (%)</label>
               <input type="number" id="inputRFR" value="2" min="0" max="15" step="0.5" style="width:110px" title="Usada para calcular el Ratio de Sharpe"/>
             </div>
@@ -877,6 +885,7 @@ async function runSim(){
   const endYear    = parseInt(document.getElementById('selEndYear')?.value    || 0) || null;
   const endMonth   = parseInt(document.getElementById('selEndMonth')?.value   || 1);
   const rfr        = parseFloat(document.getElementById('inputRFR')?.value ?? 2) || 2;
+  const benchmark  = document.getElementById('selBenchmark')?.value || 'avg';
   const btn = document.getElementById('btnSim');
   const div = document.getElementById('div-sim');
   btn.disabled=true;
@@ -892,7 +901,7 @@ async function runSim(){
     if(startYear)         url += `&start_year=${startYear}`;
     if(startMonth !== 1)  url += `&start_month=${startMonth}`;
     if(endYear)           url += `&end_year=${endYear}&end_month=${endMonth}`;
-    url += `&risk_free_rate=${rfr}`;
+    url += `&risk_free_rate=${rfr}&benchmark=${encodeURIComponent(benchmark)}`;
     const d = await fetch(url).then(r=>r.json());
     if(d.error) throw new Error(d.error);
     // Show period info bar
@@ -993,6 +1002,8 @@ function buildSim(d){
   };
 
   let _infoId = 0;
+  const BENCH_NAMES = {'avg':'Media fondos','^GSPC':'S&P 500','^STOXX50E':'Euro Stoxx 50'};
+  const benchName  = BENCH_NAMES[d.benchmark_ticker] || d.benchmark_ticker || 'Benchmark';
   const sharpeColor = v => v >= 1 ? 'var(--green)' : v >= 0.5 ? 'var(--gold)' : v >= 0 ? 'var(--txt)' : 'var(--red)';
   const hcard=(cls,label,s,isC=false,winner=false,infoKey='a')=>{
     const id = `inf-${++_infoId}`;
@@ -1012,7 +1023,7 @@ function buildSim(d){
       <div><div class="hdlbl">Volatilidad anual</div><div class="hdval" style="color:var(--muted)">${s.volatility_pct!=null?s.volatility_pct.toFixed(1)+'%':'—'}</div></div>
       <div><div class="hdlbl">Sharpe (${rfLabel})</div><div class="hdval" style="color:${sharpeColor(s.sharpe_ratio)}">${s.sharpe_ratio!=null?s.sharpe_ratio.toFixed(2):'—'}</div></div>
       <div><div class="hdlbl">Max Drawdown</div><div class="hdval" style="color:var(--red)">${s.max_drawdown_pct!=null?'-'+s.max_drawdown_pct.toFixed(1)+'%':'—'}</div></div>
-      <div><div class="hdlbl">vs Benchmark</div><div class="hdval" style="color:${s.bench_return_pct!=null&&s.total_return_pct>s.bench_return_pct?'var(--green)':'var(--red)'}">${s.bench_return_pct!=null?fe(s.total_return_pct-s.bench_return_pct,1):'—'}</div></div>
+      <div><div class="hdlbl">vs ${benchName}</div><div class="hdval" style="color:${s.bench_return_pct!=null&&s.total_return_pct>s.bench_return_pct?'var(--green)':'var(--red)'}">${s.bench_return_pct!=null?fe(s.total_return_pct-s.bench_return_pct,1):'—'}</div></div>
     </div>
     ${periodStr?`<div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--brd);font-size:.7rem;color:var(--muted)">${periodStr}</div>`:''}
     <button class="info-btn" onclick="toggleInfo(this,'${id}')">
