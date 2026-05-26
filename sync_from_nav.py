@@ -25,18 +25,24 @@ DB_PATH = os.environ.get(
 def _get_complete_month(con) -> str:
     """
     Return the last year_month with near-complete fund coverage (≥95% of
-    the previous month). This avoids using partial current-month data.
+    the previous month). Always excludes the current calendar month, which
+    is in-progress and may contain partial NAV data.
     """
+    from datetime import date as _date
+    today = _date.today()
+    current_ym = f"{today.year}-{today.month:02d}"
+
     rows = con.execute(
         "SELECT year_month, COUNT(*) as n FROM monthly_nav "
-        "WHERE return_pct IS NOT NULL GROUP BY year_month "
-        "ORDER BY year_month DESC LIMIT 3"
+        "WHERE return_pct IS NOT NULL AND year_month < ? "
+        "GROUP BY year_month ORDER BY year_month DESC LIMIT 2",
+        (current_ym,),
     ).fetchall()
     if not rows:
         return None
     latest_n = rows[0][1]
     if len(rows) >= 2 and rows[1][1] > 0 and latest_n < rows[1][1] * 0.95:
-        return rows[1][0]  # latest is partial, use previous
+        return rows[1][0]  # latest pre-current month is still sparse, use the one before
     return rows[0][0]
 
 

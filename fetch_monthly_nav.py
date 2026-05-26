@@ -100,16 +100,22 @@ def _save_ms_ids(isin: str, sec_id: str, pi_id: str, name: str):
 def _save_nav(isin: str, pts: list) -> int:
     if not pts:
         return 0
+    from datetime import date as _date
+    current_ym = _date.today().strftime("%Y-%m")
     con = sqlite3.connect(DB_PATH)
     try:
+        stored = 0
         for i, pt in enumerate(pts):
             ym  = pt["date"][:7]
+            if ym >= current_ym:   # skip current incomplete month
+                continue
             val = float(pt["value"])
             ret = round((val / float(pts[i-1]["value"]) - 1) * 100, 4) if i > 0 else None
             con.execute("INSERT OR REPLACE INTO monthly_nav VALUES (?,?,?,?)",
                         (isin, ym, val, ret))
+            stored += 1
         con.commit()
-        return len(pts)
+        return stored
     finally:
         con.close()
 
