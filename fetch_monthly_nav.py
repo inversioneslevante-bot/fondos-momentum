@@ -28,7 +28,10 @@ if not logger.handlers:
         datefmt="%H:%M:%S",
     )
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cache.db")
+DB_PATH = os.environ.get(
+    "FONDOS_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "data", "cache.db"),
+)
 N_WORKERS    = 3      # parallel persistent browser contexts
 PAGE_TIMEOUT = 25_000  # ms per page load
 WAIT_SECS    = 6.0    # seconds to wait for chart XHR after page load
@@ -63,10 +66,12 @@ def _get_all_isins() -> List[Tuple[str, str]]:
 
 
 def _already_fetched(isin: str) -> bool:
-    """Return True only if the fund has NAV data from within the last ~35 days.
-    This ensures monthly re-fetches happen automatically when new data is available."""
-    from datetime import date, timedelta
-    cutoff = (date.today() - timedelta(days=35)).strftime("%Y-%m")
+    """Return True only if the fund already has data for the last complete month
+    (the month before the current one)."""
+    from datetime import date
+    today = date.today()
+    y, m = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+    cutoff = f"{y}-{m:02d}"
     con = sqlite3.connect(DB_PATH)
     try:
         latest = con.execute(
@@ -362,4 +367,8 @@ def fetch_all(force: bool = False) -> dict:
 
 if __name__ == "__main__":
     import sys
-    fetch_all(force="--force" in sys.argv)
+    res = fetch_all(force="--force" in sys.argv)
+    # Non-zero exit when every fetch failed (e.g. Morningstar blocked us),
+    # so the scheduled GitHub Action is marked as failed and emails an alert.
+    if res.get("failed") and not res.get("fetched"):
+        sys.exit(1)

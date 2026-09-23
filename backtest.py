@@ -213,56 +213,66 @@ def _annual_both(monthly_c: float, start_year: int = 2016, end_year: int = None,
 
     # Partial current year — only when no explicit end date was given
     if user_end_ym is None:
-        latest_ym_row = _q(
-            "SELECT MAX(year_month) AS m FROM monthly_nav WHERE return_pct IS NOT NULL"
-        )
-        latest_ym = latest_ym_row[0]["m"] if latest_ym_row and latest_ym_row[0]["m"] else None
+        from data_service import get_last_complete_month
+        latest_ym = get_last_complete_month()
 
+        # Year-to-date (Jan → last complete month) of the previous year's top 5
         top5_signal = _q("""
             SELECT a.isin, a.return_pct AS sig_ret,
-                   f.name, f.category_mediolanum AS cat, p.return_1m
+                   f.name, f.category_mediolanum AS cat, p.return_ytd
             FROM annual_returns a JOIN funds f USING (isin)
             LEFT JOIN period_returns p USING (isin)
             WHERE a.year = ? AND a.return_pct IS NOT NULL
             ORDER BY a.return_pct DESC LIMIT 5
         """, (end_year,))
-        cur_1m = [r["return_1m"] for r in top5_signal if r["return_1m"] is not None]
-        # Benchmark for partial year: use external ticker if available, else avg of all funds
-        ext_b1m = _bench_monthly(benchmark_ticker).get(latest_ym) if latest_ym else None
-        if ext_b1m is not None:
-            b1m = ext_b1m
+        cur_ytd = [r["return_ytd"] for r in top5_signal if r["return_ytd"] is not None]
+        # Only when the latest complete month belongs to the year after end_year
+        partial_ok = bool(latest_ym) and int(latest_ym[:4]) == end_year + 1
+        n_months = int(latest_ym[5:7]) if partial_ok else 0
+
+        # Benchmark YTD: external ticker compounded over the same months, else avg of all funds
+        ext = _bench_monthly(benchmark_ticker)
+        ext_months = [ext[f"{end_year + 1}-{m:02d}"] for m in range(1, n_months + 1)
+                      if f"{end_year + 1}-{m:02d}" in ext]
+        if ext and n_months and len(ext_months) == n_months:
+            v = 1.0
+            for r in ext_months:
+                v *= 1 + r / 100
+            b1m = (v - 1) * 100
         else:
-            b1m_row = _q("SELECT AVG(return_1m) AS a FROM period_returns WHERE return_1m IS NOT NULL")
+            b1m_row = _q("SELECT AVG(return_ytd) AS a FROM period_returns WHERE return_ytd IS NOT NULL")
             b1m = (b1m_row[0]["a"] or 0.0) if b1m_row else 0.0
 
-        if cur_1m and latest_ym:
-            r1m = sum(cur_1m) / len(cur_1m)
-            portA  *= (1 + r1m / 100);  benchA *= (1 + b1m / 100)
+        if cur_ytd and partial_ok:
+            r1m = sum(cur_ytd) / len(cur_ytd)
+            partial_c = monthly_c * n_months
             if lump_sum:
-                portB  *= (1 + r1m / 100)
-                benchB *= (1 + b1m / 100)
+                portA  *= (1 + r1m / 100); benchA *= (1 + b1m / 100)
+                portB  *= (1 + r1m / 100); benchB *= (1 + b1m / 100)
             else:
-                portB   = (portB  + monthly_c) * (1 + r1m / 100)
-                benchB  = (benchB + monthly_c) * (1 + b1m / 100)
-                invested += monthly_c
+                portA   = portA  * (1 + r1m / 100) + partial_c * (1 + r1m / 200)
+                benchA  = benchA * (1 + b1m / 100) + partial_c * (1 + b1m / 200)
+                portB   = (portB  + partial_c) * (1 + r1m / 100)
+                benchB  = (benchB + partial_c) * (1 + b1m / 100)
+                invested += partial_c
 
             MONTHS_SHORT = {
                 "01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
                 "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic",
             }
             ym_parts = latest_ym.split("-")
-            partial_label = f"{ym_parts[0]} ({MONTHS_SHORT.get(ym_parts[1], ym_parts[1])})"
+            partial_label = f"{ym_parts[0]} (Ene–{MONTHS_SHORT.get(ym_parts[1], ym_parts[1])})"
 
             partial_funds = [{
                 "isin": r["isin"], "name": r["name"], "category": r["cat"],
                 "signal_return": round(r["sig_ret"], 2),
-                "actual_return": round(r["return_1m"], 2) if r["return_1m"] else None,
+                "actual_return": round(r["return_ytd"], 2) if r["return_ytd"] is not None else None,
             } for r in top5_signal]
 
             pbase = {
                 "year": partial_label, "period": partial_label, "ret": r1m,
                 "strategy_return": round(r1m, 2), "benchmark_return": round(b1m, 2),
-                "total_invested": round(invested, 2), "n_funds": len(cur_1m),
+                "total_invested": round(invested, 2), "n_funds": len(cur_ytd),
                 "funds_selected": partial_funds,
             }
             periA.append({**pbase, "portfolio_value": round(portA, 2),
@@ -493,14 +503,18 @@ def run_all(monthly_contribution: float = 1_000.0,
     start_month = max(1, min(12, int(start_month)))
     start_ym = f"{start_year}-{start_month:02d}"
 
-    # Determine effective end date: only apply if it's strictly before today
-    today = _date.today()
-    current_ym = f"{today.year}-{today.month:02d}"
+    # Determine effective end date: only apply if it's before the latest complete
+    # data month (choosing that month or later means "up to today")
+    from data_service import get_last_complete_month
+    latest_complete = get_last_complete_month()
+    if not latest_complete:
+        today = _date.today()
+        latest_complete = f"{today.year}-{today.month:02d}"
     user_end_ym = None
     annual_end_year = None
     if end_year is not None and end_month is not None:
         candidate = f"{end_year}-{end_month:02d}"
-        if candidate < current_ym:
+        if candidate < latest_complete:
             user_end_ym     = candidate
             annual_end_year = end_year
 

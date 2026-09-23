@@ -76,6 +76,13 @@ def run_sync() -> dict:
             v *= 1 + ret / 100
         return round((v - 1) * 100, 4)
 
+    # Clear stale figures first: funds with no data for the reference month
+    # (closed/merged or not yet published) must drop out of the current ranking
+    con.execute(
+        "UPDATE period_returns SET return_1m=NULL, return_3m=NULL, return_6m=NULL, "
+        "return_ytd=NULL, return_1a=NULL"
+    )
+
     updated = 0
     for isin, months in fund_months.items():
         # Build a dict for fast lookup by year_month
@@ -107,12 +114,39 @@ def run_sync() -> dict:
         if con.execute("SELECT changes()").fetchone()[0]:
             updated += 1
 
-    # Invalidate current-year and partial cache so rankings refresh
-    con.execute("DELETE FROM top5_year_cache WHERE period=?", (current_year,))
+    # Fill annual_returns for fully completed years missing from the CSV import
+    # (e.g. 2026 once December 2026 is in). Existing CSV rows are left untouched.
+    last_csv_year = con.execute("SELECT MAX(year) FROM annual_returns").fetchone()[0] or 0
+    new_years = set()
+    for isin, months in fund_months.items():
+        by_year: dict = defaultdict(list)
+        for m, r in months:
+            if m <= latest_ym and int(m[:4]) > last_csv_year:
+                by_year[int(m[:4])].append(r)
+        for yr, rets in by_year.items():
+            if len(rets) != 12:
+                continue
+            v = 1.0
+            for r in rets:
+                v *= 1 + r / 100
+            mean = sum(rets) / 12
+            vol = (sum((r - mean) ** 2 for r in rets) / 11) ** 0.5 * 12 ** 0.5
+            con.execute(
+                "INSERT OR IGNORE INTO annual_returns (isin, year, return_pct, volatility_pct) "
+                "VALUES (?,?,?,?)",
+                (isin, yr, round((v - 1) * 100, 4), round(vol, 4)),
+            )
+            if con.execute("SELECT changes()").fetchone()[0]:
+                new_years.add(yr)
+
+    # Invalidate current-year and newly added years so rankings refresh
+    for period in {current_year, *(str(y) for y in new_years)}:
+        con.execute("DELETE FROM top5_year_cache WHERE period=?", (period,))
     con.commit()
     con.close()
 
-    logger.info(f"sync_from_nav: updated {updated} funds, latest month = {latest_ym}")
+    logger.info(f"sync_from_nav: updated {updated} funds, latest month = {latest_ym}"
+                + (f", new annual years {sorted(new_years)}" if new_years else ""))
     return {"synced": updated, "latest_month": latest_ym}
 
 

@@ -65,12 +65,22 @@ def _startup_benchmarks():
 
 # ── APScheduler: daily auto-update ───────────────────────────────────────────
 
+def _can_fetch_nav() -> bool:
+    """The Morningstar fetch needs Playwright + Chrome (available locally and in
+    the GitHub Action, not on Render — there the data arrives via git push)."""
+    try:
+        import playwright  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _scheduled_job():
     """
     Daily job at 07:00:
       1. Sync period_returns from whatever monthly_nav has.
-      2. If we're past the 3rd of the month and don't have the current month's
-         data for most funds, trigger a background Morningstar fetch.
+      2. If we're past the 3rd of the month and don't have the previous
+         (last complete) month's data, trigger a background Morningstar fetch.
     """
     from datetime import date
     logger.info("Scheduler: running daily job…")
@@ -95,11 +105,12 @@ def _scheduled_job():
         con.close()
 
         today = date.today()
-        current_ym = f"{today.year}-{today.month:02d}"
+        prev_y, prev_m = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        prev_ym = f"{prev_y}-{prev_m:02d}"
 
-        # Trigger fetch if we're on or past the 3rd and missing current month
-        if latest_ym and latest_ym < current_ym and today.day >= 3:
-            logger.info(f"Scheduler: missing {current_ym} data — triggering background fetch…")
+        # Trigger fetch if we're on or past the 3rd and missing last month
+        if latest_ym and latest_ym < prev_ym and today.day >= 3 and _can_fetch_nav():
+            logger.info(f"Scheduler: missing {prev_ym} data — triggering background fetch…")
             import threading
             def _run():
                 from fetch_monthly_nav import fetch_all
@@ -255,6 +266,9 @@ def api_benchmark_status():
 
 @app.route("/api/fetch-nav", methods=["POST"])
 def api_fetch_nav():
+    if not _can_fetch_nav():
+        return jsonify({"error": "La descarga de Morningstar no está disponible en el servidor web. "
+                                 "Los datos se actualizan automáticamente cada mes desde GitHub."}), 400
     import threading
     def _run():
         from fetch_monthly_nav import fetch_all

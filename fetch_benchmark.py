@@ -64,12 +64,21 @@ def fetch_benchmark(ticker="^GSPC", db_path=DB_PATH):
     close = data["Close"]
     returns = close.pct_change() * 100  # monthly % return
 
+    current_ym = today.strftime("%Y-%m")
     rows = []
     for idx, ret in returns.items():
         if ret is None or (isinstance(ret, float) and math.isnan(ret)):
             continue
         ym = idx.strftime("%Y-%m")
+        if ym >= current_ym:  # skip current incomplete month
+            continue
         rows.append((ticker, ym, float(ret)))
+
+    con = sqlite3.connect(db_path)
+    con.execute("DELETE FROM benchmark_returns WHERE ticker=? AND year_month>=?",
+                (ticker, current_ym))
+    con.commit()
+    con.close()
 
     if not rows:
         return 0
@@ -95,8 +104,13 @@ def fetch_all(db_path=DB_PATH):
     return total
 
 
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
+    print(f"Stored {fetch_all()} benchmark rows.")
+
+
 def needs_update(ticker="^GSPC", db_path=DB_PATH):
-    """True if the ticker's data is missing or doesn't include the current month."""
+    """True if the ticker's data is missing or doesn't include the last complete month."""
     _ensure_table(db_path)
     try:
         con = sqlite3.connect(db_path)
@@ -106,7 +120,7 @@ def needs_update(ticker="^GSPC", db_path=DB_PATH):
         con.close()
         latest = row[0] if row else None
         today = date.today()
-        current_ym = f"{today.year}-{today.month:02d}"
-        return latest is None or latest < current_ym
+        y, m = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        return latest is None or latest < f"{y}-{m:02d}"
     except Exception:
         return True

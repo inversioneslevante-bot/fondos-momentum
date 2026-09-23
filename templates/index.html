@@ -653,7 +653,8 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeSources(); }
 async function checkStatus(){
   const d = await fetch('/api/import-status').then(r=>r.json());
   const fc = d.fund_count||0, nav = d.funds_with_nav||0;
-  const latest = d.latest_month || '';
+  const latest = d.complete_month || d.latest_month || '';
+  if(latest) window._completeMonth = latest;
   document.getElementById('statusLabel').textContent = fc>0 ? `${fc} fondos activos` : 'Sin datos';
   document.getElementById('importBanner').style.display = fc>0 ? 'none' : 'flex';
   document.getElementById('fc').textContent = fc;
@@ -677,8 +678,9 @@ async function triggerImport(){
 }
 
 async function fetchNav(){
-  await fetch('/api/fetch-nav',{method:'POST'});
-  alert('Actualización de NAV iniciada en background. Puede tardar 15-30 minutos.');
+  const d = await fetch('/api/fetch-nav',{method:'POST'}).then(r=>r.json());
+  if(d.error) alert(d.error);
+  else alert('Actualización de NAV iniciada en background. Puede tardar 15-30 minutos.');
 }
 
 async function syncNow(){
@@ -827,19 +829,22 @@ async function populateYears(){
   const defaultSY = simYears.find(y => y === 2016) || simYears[0];
   if(defaultSY) selSY.value = defaultSY;
 
-  // Simulation end-year selector (all years up to current year)
+  // Simulation end-year selector (all years up to the last complete data month)
+  // Default end = last complete month (e.g. in September → August)
+  const lastYM = window._completeMonth
+    || `${curM===1?curY-1:curY}-${String(curM===1?12:curM-1).padStart(2,'0')}`;
+  const lastY = parseInt(lastYM.slice(0,4)), lastM = parseInt(lastYM.slice(5,7));
   const selEY = document.getElementById('selEndYear');
   selEY.innerHTML = '';
-  const endYears = [...years].reverse();
+  const endYears = [...new Set([...years, lastY])].filter(y => y <= lastY).sort((a,b)=>a-b);
   endYears.forEach(y=>{
     const o = document.createElement('option');
     o.value = y;
-    o.textContent = y === curY ? `${y} (hoy)` : String(y);
+    o.textContent = y === lastY ? `${y} (último dato)` : String(y);
     selEY.appendChild(o);
   });
-  selEY.value = curY;
-  // Default end month = current month
-  document.getElementById('selEndMonth').value = curM;
+  selEY.value = lastY;
+  document.getElementById('selEndMonth').value = lastM;
 }
 
 async function searchYear(){
